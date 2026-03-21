@@ -62,7 +62,7 @@ constexpr bool kVerboseFrameLoopLogs = true;
 // Predictive control parameters (integrated from ChatGPT5 algorithm)
 constexpr double SYSTEM_DELAY   = 0.045;  // Системная задержка горизонт. 45мс
 constexpr double SYSTEM_DELAY_V = 0.090;  // Вертикальная задержка — больше: серво медленнее по питчу
-constexpr double PITCH_GRAVITY_COMP = 0.08; // Компенсация гравитации: доп. % угла при наклоне вверх
+constexpr double PITCH_GRAVITY_COMP = 0.15; // Компенсация гравитации: доп. % угла при наклоне вверх
 constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)

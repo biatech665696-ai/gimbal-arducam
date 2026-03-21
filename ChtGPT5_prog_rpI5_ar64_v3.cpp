@@ -849,8 +849,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double lastPitchDeg = 90.0;
     double lastSentYawDeg = 90.0;
     double lastSentPitchDeg = 90.0;
-    const double SMOOTHING_FACTOR = 0.35;  // Плавнее — меньше перерегулирования
-    const double SERVO_DEADBAND = 0.2;     // Smaller deadband for more sensitivity
+    const double SMOOTHING_FACTOR = 0.35;
+    const double SERVO_DEADBAND = 0.2;
+    // Счётчик кадров стабилизации после движения серво
+    // Пока > 0: подавляем детекцию + быстрое переобучение фона
+    int servoSettleFrames = 0;
 
     while(run)
     {
@@ -872,6 +875,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // learningRate for BGS: 1.0 on mode change (instant reset), 0.05 for
         // first 60 frames (fast warm-up at new static position), 0.01 normal
         double bgsLearningRate = 0.01;
+        // Если серво недавно двигалось — ускоряем переобучение фона
+        bool cameraSettling = (servoSettleFrames > 0);
+        if (cameraSettling) {
+            bgsLearningRate = 0.5;
+            servoSettleFrames--;
+        }
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;
@@ -909,6 +918,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // Detect motion on downscaled frame
         Detection d = centroid(gray, 0, 0, bgsLearningRate);
+        
+        // Пока камера стабилизируется после движения серво — игнорируем детекцию.
+        // Это разрывает петлю: фон сместился → детектор видит фон → серво двигается → фон снова смещается.
+        if (cameraSettling) {
+            d.valid = false;
+            d.all_boxes.clear();
+        }
         
         // Scale detection coordinates back to original resolution
         if (d.valid) {
@@ -990,6 +1006,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             
             // Move servos only in TRACKING mode
             if (currentTrackingEnabled) {
+                // Движение серво: запускаем счётчик стабилизации если ۖугол > 0.8°
+                double moveAmount = std::abs(yawDeg - lastSentYawDeg)
+                                  + std::abs(pitchDeg - lastSentPitchDeg);
+                if (moveAmount > 0.8) {
+                    servoSettleFrames = 12;  // подавляем детекцию на 12 кадров (цена ~0.27 сек)
+                }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
                 lastSentYawDeg = yawDeg;

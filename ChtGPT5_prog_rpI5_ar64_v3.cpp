@@ -510,6 +510,7 @@ public:
     double P[4];
 
     double lastTime;
+    double lastValidTime;
 
     AngleKalman()
     {
@@ -519,6 +520,7 @@ public:
             P[i] = 1.0;  // Initial uncertainty
         }
         lastTime = timeNow();
+        lastValidTime = -1.0;
     }
 
     double timeNow()
@@ -569,11 +571,15 @@ public:
             x[0] = x[0] + K0 * y0;
             x[1] = x[1] + K1 * y1;
 
-            // Update velocities based on innovation (simple derivative)
+            // Update velocities based on innovation divided by time
+            // since last VALID detection (not just one frame dt)
+            double dtValid = (lastValidTime > 0) ? (t - lastValidTime) : dt;
+            if (dtValid < dt) dtValid = dt;
             if (dt > 0) {
-                x[2] = 0.9 * x[2] + 0.1 * (y0 / dt);  // Exponential smoothing
-                x[3] = 0.9 * x[3] + 0.1 * (y1 / dt);
+                x[2] = 0.9 * x[2] + 0.1 * (y0 / dtValid);  // rad/s
+                x[3] = 0.9 * x[3] + 0.1 * (y1 / dtValid);
             }
+            lastValidTime = t;
 
             // Covariance update: P = (I - K * H) * P
             P[0] = (1.0 - K0) * P[0];

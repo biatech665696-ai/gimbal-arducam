@@ -878,7 +878,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Если серво недавно двигалось — ускоряем переобучение фона
         bool cameraSettling = (servoSettleFrames > 0);
         if (cameraSettling) {
-            bgsLearningRate = 0.5;
+            bgsLearningRate = 0.7;
             servoSettleFrames--;
         }
         if (!currentTrackingEnabled) {
@@ -1010,7 +1010,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
                 if (moveAmount > 0.8) {
-                    servoSettleFrames = 12;  // подавляем детекцию на 12 кадров (цена ~0.27 сек)
+                    servoSettleFrames = 9;  // 9 кадров ~0.20с
                 }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));

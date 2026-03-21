@@ -64,6 +64,7 @@ constexpr double SYSTEM_DELAY   = 0.045;  // Системная задержка
 constexpr double SYSTEM_DELAY_V = 0.090;  // Вертикальная задержка — больше: серво медленнее по питчу
 constexpr double PITCH_GRAVITY_COMP = 0.15; // Компенсация гравитации: доп. % угла при наклоне вверх
 constexpr double PITCH_BACKLASH = 20.0;       // Компенсация люфта серво (°): преднатяг вверх против гравитации
+constexpr double YAW_BACKLASH   = 5.0;        // Компенсация люфта горизонт. серво (°): преднатяг в сторону от центра
 constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)
@@ -1003,6 +1004,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double adaptiveGain = GAIN_MIN + (GAIN_MAX - GAIN_MIN) * std::min(errorMag / ERROR_MAX, 1.0);
             
             yawDeg = 90.0 - (thetaDeg * adaptiveGain);
+            // Компенсация люфта горизонт. серво: преднатяг в сторону отклонения
+            if (yawDeg > 90.0) {
+                yawDeg += YAW_BACKLASH;
+            } else if (yawDeg < 90.0) {
+                yawDeg -= YAW_BACKLASH;
+            }
             // Гравитационная компенсация: серво провисает когда камера смотрит вверх
             // pitchDeg > 90 → камера смотрит вверх → добавляем extra угол
             double rawPitchDeg = 90.0 - (phiDeg * adaptiveGain);

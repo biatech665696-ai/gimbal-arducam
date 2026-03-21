@@ -269,14 +269,18 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.01)
     // === BACKGROUND SUBTRACTION MOG2 (ADAPTIVE BACKGROUND MODEL) ===
     // This method adapts to camera movement and filters moving background
     static cv::Ptr<cv::BackgroundSubtractorMOG2> bgSubtractor = 
-        cv::createBackgroundSubtractorMOG2(500, 52, false);  // history=500, varThreshold=52 (снижает фоновый шум, реальное движение всё равно видно)
+        cv::createBackgroundSubtractorMOG2(120, 52, false);  // history=120 (~2.7s @ 45fps) — быстрый старт
+    
+    // Прогрев: первые 20 кадров обучаем с высоким learningRate чтобы модель
+    // фона сформировалась за ~0.5 сек вместо 11 секунд.
+    static int warmupFrames = 0;
     
     static cv::Point2f lastValidCenter(-1, -1);
     static int consecutiveDetections = 0;
     static int consecutiveMisses = 0;
     static std::vector<cv::Rect> prevFrameBoxes;   // для временно́й фильтрации шумов
-    const int MIN_DETECTIONS = 2;  // Require 2 frames of stable detection
-    const int MAX_MISSES = 60;  // Hold position for 2 seconds (60 frames @ 30fps)
+    const int MIN_DETECTIONS = 2;
+    const int MAX_MISSES = 60;
     
     Detection d;
     d.valid = false;
@@ -294,7 +298,12 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.01)
 
     // Apply background subtraction (adapts to camera movement)
     cv::Mat fgMask;
-    bgSubtractor->apply(gray, fgMask, learningRate);  // dynamic learningRate (1.0 = instant reset)
+    // Прогрев первых 20 кадров: высокий learningRate чтобы быстро построить модель фона
+    double effectiveLR = (warmupFrames < 20) ? 0.5 : learningRate;
+    if (warmupFrames < 20) warmupFrames++;
+    bgSubtractor->apply(gray, fgMask, effectiveLR);
+    // Во время прогрева маску обнуляем — детекция ещё ненадёжна
+    if (warmupFrames < 20) fgMask = cv::Mat::zeros(fgMask.size(), fgMask.type());
 
     // Morphology to clean up noise and connect nearby regions
     cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
@@ -1249,3 +1258,5 @@ void killPreviousInstances() {
     }
     closedir(dir);
 }
+
+//https://github.com/biatech665696-ai/gimbal-arducam.git

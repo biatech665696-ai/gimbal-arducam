@@ -591,10 +591,7 @@ public:
             // Slowly decay velocities to prevent oscillation
             x[2] = x[2] * 0.95;  // Decay velocity estimates
             x[3] = x[3] * 0.95;
-            
-            // Slowly move back to center
-            x[0] = x[0] * 0.98;  // Decay theta toward 0
-            x[1] = x[1] * 0.98;  // Decay phi toward 0
+            // Позиция не дрейфует к центру — объект продолжает двигаться
             
             // Increase uncertainty when no measurement
             P[0] += 0.01;

@@ -269,7 +269,7 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.01)
     // === BACKGROUND SUBTRACTION MOG2 (ADAPTIVE BACKGROUND MODEL) ===
     // This method adapts to camera movement and filters moving background
     static cv::Ptr<cv::BackgroundSubtractorMOG2> bgSubtractor = 
-        cv::createBackgroundSubtractorMOG2(120, 52, false);  // history=120 (~2.7s @ 45fps) — быстрый старт
+        cv::createBackgroundSubtractorMOG2(50, 52, false);  // history=50 (~1.1s @ 45fps) — быстрее учит новый фон
     
     // Прогрев: первые 20 кадров обучаем с высоким learningRate чтобы модель
     // фона сформировалась за ~0.5 сек вместо 11 секунд.

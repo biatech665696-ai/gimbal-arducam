@@ -1099,18 +1099,39 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         
         // Draw centroid if valid - make it more visible
         if (d.valid) {
-            // Red target marker
-            cv::circle(display, cv::Point(static_cast<int>(d.x), static_cast<int>(d.y)), 
-                      10, cv::Scalar(0, 0, 255), -1);
-            cv::circle(display, cv::Point(static_cast<int>(d.x), static_cast<int>(d.y)), 
-                      15, cv::Scalar(255, 255, 255), 3);
-            // Crosshair on target
             int tx = static_cast<int>(d.x);
             int ty = static_cast<int>(d.y);
-            cv::line(display, cv::Point(tx - 25, ty), cv::Point(tx + 25, ty), 
+
+            // Red target marker
+            cv::circle(display, cv::Point(tx, ty), 10, cv::Scalar(0, 0, 255), -1);
+            cv::circle(display, cv::Point(tx, ty), 15, cv::Scalar(255, 255, 255), 3);
+            // Crosshair on target
+            cv::line(display, cv::Point(tx - 25, ty), cv::Point(tx + 25, ty),
                     cv::Scalar(255, 0, 0), 2);
-            cv::line(display, cv::Point(tx, ty - 25), cv::Point(tx, ty + 25), 
+            cv::line(display, cv::Point(tx, ty - 25), cv::Point(tx, ty + 25),
                     cv::Scalar(255, 0, 0), 2);
+
+            // === СТРЕЛКА НАПРАВЛЕНИЯ ДВИЖЕНИЯ ===
+            // s.wtheta > 0 → объект движется вправо в кадре
+            // s.wphi   > 0 → объект движется вниз в кадре
+            double velX = s.wtheta;  // рад/с по горизонтали
+            double velY = s.wphi;    // рад/с по вертикали
+            double velMag = std::sqrt(velX * velX + velY * velY);
+            if (velMag > 0.01) {  // рисуем только если есть реальное движение
+                const double ARROW_SCALE = 800.0;   // пикселей на рад/с
+                const double ARROW_MAX   = 150.0;   // макс. длина стрелки (px)
+                double arrowLen = std::min(velMag * ARROW_SCALE, ARROW_MAX);
+                int ax = tx + static_cast<int>(velX / velMag * arrowLen);
+                int ay = ty + static_cast<int>(velY / velMag * arrowLen);
+                // Жёлтая стрелка с толщиной 3
+                cv::arrowedLine(display, cv::Point(tx, ty), cv::Point(ax, ay),
+                               cv::Scalar(0, 255, 255), 3, cv::LINE_AA, 0, 0.3);
+                // Скорость подписываем рядом
+                std::ostringstream velStr;
+                velStr << std::fixed << std::setprecision(2) << velMag << " r/s";
+                cv::putText(display, velStr.str(), cv::Point(ax + 5, ay - 5),
+                           cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 255), 1);
+            }
         }
         
         // Draw center crosshair (use actual frame dimensions, not constants)

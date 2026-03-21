@@ -60,7 +60,9 @@ constexpr bool kVerboseTrackingLogs = true;
 constexpr bool kVerboseFrameLoopLogs = true;
 
 // Predictive control parameters (integrated from ChatGPT5 algorithm)
-constexpr double SYSTEM_DELAY = 0.045;  // Системная задержка 45мс
+constexpr double SYSTEM_DELAY   = 0.045;  // Системная задержка горизонт. 45мс
+constexpr double SYSTEM_DELAY_V = 0.090;  // Вертикальная задержка — больше: серво медленнее по питчу
+constexpr double PITCH_GRAVITY_COMP = 0.08; // Компенсация гравитации: доп. % угла при наклоне вверх
 constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)
@@ -597,10 +599,11 @@ public:
 
 /* =============== PREDICTIVE CONTROL =============== */
 
-void predictFuture(AngleState &s,double dt)
+// dtH — горизонтальная задержка, dtV — вертикальная (обычно больше)
+void predictFuture(AngleState &s, double dtH, double dtV)
 {
-    s.theta+=s.wtheta*dt;
-    s.phi  +=s.wphi*dt;
+    s.theta += s.wtheta * dtH;
+    s.phi   += s.wphi   * dtV;
 }
 
 /* =============== PD CONTROLLER =============== */
@@ -961,7 +964,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             kalman.update(theta,phi,d.valid);
 
         if (USE_PREDICTIVE_CONTROL) {
-            predictFuture(s,SYSTEM_DELAY);
+            predictFuture(s, SYSTEM_DELAY, SYSTEM_DELAY_V);
         }
 
         // === SERVO CONTROL (only in TRACKING mode) ===
@@ -999,7 +1002,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double adaptiveGain = GAIN_MIN + (GAIN_MAX - GAIN_MIN) * std::min(errorMag / ERROR_MAX, 1.0);
             
             yawDeg = 90.0 - (thetaDeg * adaptiveGain);
-            pitchDeg = 90.0 - (phiDeg * adaptiveGain);
+            // Гравитационная компенсация: серво провисает когда камера смотрит вверх
+            // pitchDeg > 90 → камера смотрит вверх → добавляем extra угол
+            double rawPitchDeg = 90.0 - (phiDeg * adaptiveGain);
+            double gravityComp = (rawPitchDeg - 90.0) * PITCH_GRAVITY_COMP;
+            pitchDeg = rawPitchDeg + gravityComp;
             
             // Debug output
             std::cout << "theta=" << thetaDeg << "° phi=" << phiDeg 

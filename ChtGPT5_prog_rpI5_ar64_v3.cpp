@@ -452,16 +452,10 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.01)
 
 cv::Rect computeROI(double x, double y, int w, int h, int objW = 0, int objH = 0)
 {
-    // === SMOOTH ROI TRANSITION TO PREVENT JUMPING ===
-    static double smoothX = x;
-    static double smoothY = y;
+    // === ADAPTIVE ROI SIZE (position follows object exactly, only size is smoothed) ===
     static double smoothSize = 400.0;
-    const double SMOOTHING = 0.3;  // 30% new position, 70% old position
-    
-    // Smooth the ROI center position
-    smoothX = SMOOTHING * x + (1.0 - SMOOTHING) * smoothX;
-    smoothY = SMOOTHING * y + (1.0 - SMOOTHING) * smoothY;
-    
+    const double SIZE_SMOOTHING = 0.2;  // плавное изменение размера
+
     // === ADAPTIVE ROI SIZE ===
     // Searching: large ROI (400px) to find object
     // Captured:  shrink to 4x object size (min 120px, max 400px) для точной слежки
@@ -472,12 +466,12 @@ cv::Rect computeROI(double x, double y, int w, int h, int objW = 0, int objH = 0
     } else {
         targetSize = 400.0;  // Full size when searching
     }
-    // Smooth the size transition to avoid jarring jumps
-    smoothSize = SMOOTHING * targetSize + (1.0 - SMOOTHING) * smoothSize;
+    // Smooth only the size — центр ROI == позиция объекта (без лага)
+    smoothSize = SIZE_SMOOTHING * targetSize + (1.0 - SIZE_SMOOTHING) * smoothSize;
     int size = static_cast<int>(smoothSize);
 
-    int rx = static_cast<int>(smoothX) - size/2;
-    int ry = static_cast<int>(smoothY) - size/2;
+    int rx = static_cast<int>(x) - size/2;
+    int ry = static_cast<int>(y) - size/2;
 
     rx = max(0, rx);
     ry = max(0, ry);

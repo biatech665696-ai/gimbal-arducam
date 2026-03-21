@@ -1097,10 +1097,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
         }
         
-        // Raw-arrow state: declared before if/else so both branches can access
+        // Raw-arrow state
         static double prevRawX = -1, prevRawY = -1;
         static double smoothDX = 0, smoothDY = 0;
-        static int skippedFrames = 1;
+        // servoSettleFrames=9 → между детекциями всегда 10 кадров
+        constexpr double FRAMES_BETWEEN_DETECTIONS = 10.0;
 
         // Draw centroid if valid - make it more visible
         if (d.valid) {
@@ -1136,9 +1137,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // === СТРЕЛКА 2: прирост координат (зелёная) ===
             if (prevRawX > 0) {
-                // Делим на количество пропущенных кадров → скорость за 1 кадр
-                double rawDX = (d.x - prevRawX) / skippedFrames;
-                double rawDY = (d.y - prevRawY) / skippedFrames;
+                // Делим на фиксированное число кадров между детекциями
+                double rawDX = (d.x - prevRawX) / FRAMES_BETWEEN_DETECTIONS;
+                double rawDY = (d.y - prevRawY) / FRAMES_BETWEEN_DETECTIONS;
                 smoothDX = 0.5 * rawDX + 0.5 * smoothDX;
                 smoothDY = 0.5 * rawDY + 0.5 * smoothDY;
                 double rawMag = std::sqrt(smoothDX * smoothDX + smoothDY * smoothDY);
@@ -1158,9 +1159,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
             prevRawX = d.x;
             prevRawY = d.y;
-            skippedFrames = 1;  // сброс счётчика
-        } else {
-            skippedFrames++;  // считаем кадры без детекции
         }
         
         // Draw center crosshair (use actual frame dimensions, not constants)

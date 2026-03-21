@@ -864,7 +864,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double lastPitchDeg = 90.0;
     double lastSentYawDeg = 90.0;
     double lastSentPitchDeg = 90.0;
-    const double SMOOTHING_FACTOR = 0.20;
+    const double SMOOTHING_FACTOR = 0.40;  // 0.20 было — серво не догоняло объект
     const double SERVO_DEADBAND = 0.2;
     // Счётчик кадров стабилизации после движения серво
     // Пока > 0: подавляем детекцию + быстрое переобучение фона

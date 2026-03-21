@@ -984,8 +984,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double phiDeg = (s.phi * 180.0 / M_PI);
             
             // Gain 1.2: знаки проверены физически на стенде
-            yawDeg = 90.0 - (thetaDeg * 1.2);
-            pitchDeg = 90.0 - (phiDeg * 1.2);
+            yawDeg = 90.0 - (thetaDeg * 1.5);
+            pitchDeg = 90.0 - (phiDeg * 1.5);
             
             // Debug output
             std::cout << "theta=" << thetaDeg << "° phi=" << phiDeg 

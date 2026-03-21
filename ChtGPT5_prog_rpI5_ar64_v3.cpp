@@ -63,7 +63,7 @@ constexpr bool kVerboseFrameLoopLogs = true;
 constexpr double SYSTEM_DELAY   = 0.045;  // Системная задержка горизонт. 45мс
 constexpr double SYSTEM_DELAY_V = 0.090;  // Вертикальная задержка — больше: серво медленнее по питчу
 constexpr double PITCH_GRAVITY_COMP = 0.15; // Компенсация гравитации: доп. % угла при наклоне вверх
-constexpr double PITCH_BACKLASH = 10.0;       // Компенсация люфта серво (°): преднатяг вверх против гравитации
+constexpr double PITCH_BACKLASH = 20.0;       // Компенсация люфта серво (°): преднатяг вверх против гравитации
 constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)

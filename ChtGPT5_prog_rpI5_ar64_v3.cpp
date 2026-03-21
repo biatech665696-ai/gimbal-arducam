@@ -983,9 +983,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double thetaDeg = (s.theta * 180.0 / M_PI);
             double phiDeg = (s.phi * 180.0 / M_PI);
             
-            // Gain 1.2: достаточно для уверенного трекинга без перерегулирования
-            yawDeg = 90.0 + (thetaDeg * 1.2);
-            pitchDeg = 90.0 - (phiDeg * 1.2);
+            // Gain 1.2: знаки проверены физически на стенде
+            yawDeg = 90.0 - (thetaDeg * 1.2);
+            pitchDeg = 90.0 + (phiDeg * 1.2);
             
             // Debug output
             std::cout << "theta=" << thetaDeg << "° phi=" << phiDeg 

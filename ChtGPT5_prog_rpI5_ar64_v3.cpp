@@ -1041,7 +1041,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Пропорциональное движение к цели: шаг = PROP_GAIN * ошибка, но не более MAX_STEP
             // Далеко → большой шаг (быстро догоняет), близко → маленький (плавно, без колебаний)
             const double PROP_GAIN = 0.7;   // 70% ошибки за кадр
-            const double MAX_STEP  = 15.0;  // max градусов за кадр
+            const double MAX_STEP  = 20.0;  // max градусов за кадр
             double yawError   = yawDeg   - lastYawDeg;
             double pitchError = pitchDeg - lastPitchDeg;
             yawDeg   = lastYawDeg   + std::max(-MAX_STEP, std::min(MAX_STEP, PROP_GAIN * yawError));

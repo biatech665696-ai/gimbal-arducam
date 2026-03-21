@@ -450,21 +450,34 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.01)
 
 /* =============== ROI COMPUTATION =============== */
 
-cv::Rect computeROI(double x,double y,int w,int h)
+cv::Rect computeROI(double x, double y, int w, int h, int objW = 0, int objH = 0)
 {
     // === SMOOTH ROI TRANSITION TO PREVENT JUMPING ===
     static double smoothX = x;
     static double smoothY = y;
+    static double smoothSize = 400.0;
     const double SMOOTHING = 0.3;  // 30% new position, 70% old position
     
     // Smooth the ROI center position
     smoothX = SMOOTHING * x + (1.0 - SMOOTHING) * smoothX;
     smoothY = SMOOTHING * y + (1.0 - SMOOTHING) * smoothY;
     
-    int size = 400;  // ROI size
+    // === ADAPTIVE ROI SIZE ===
+    // Searching: large ROI (400px) to find object
+    // Captured:  shrink to 4x object size (min 120px, max 400px) для точной слежки
+    double targetSize;
+    if (objW > 0 && objH > 0) {
+        double objMaxDim = std::max(objW, objH);
+        targetSize = std::max(120.0, std::min(400.0, objMaxDim * 4.0));
+    } else {
+        targetSize = 400.0;  // Full size when searching
+    }
+    // Smooth the size transition to avoid jarring jumps
+    smoothSize = SMOOTHING * targetSize + (1.0 - SMOOTHING) * smoothSize;
+    int size = static_cast<int>(smoothSize);
 
-    int rx = smoothX - size/2;
-    int ry = smoothY - size/2;
+    int rx = static_cast<int>(smoothX) - size/2;
+    int ry = static_cast<int>(smoothY) - size/2;
 
     rx = max(0, rx);
     ry = max(0, ry);
@@ -1043,7 +1056,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         
         // Draw ROI window if object is detected
         if (d.valid) {
-            cv::Rect roi = computeROI(d.x, d.y, display.cols, display.rows);
+            cv::Rect roi = computeROI(d.x, d.y, display.cols, display.rows, d.box_w, d.box_h);
             // Draw ROI rectangle with cyan color
             cv::rectangle(display, roi, cv::Scalar(255, 255, 0), 3);  // Cyan border, thickness=3
             // Add label for ROI

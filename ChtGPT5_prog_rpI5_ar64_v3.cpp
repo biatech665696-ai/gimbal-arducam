@@ -679,11 +679,11 @@ public:
         yaw+=uy;
         pitch+=up;
 
-        // Clamp angles to servo limits (with safe margin)
-        if(yaw < 30.0) yaw = 30.0;
-        if(yaw > 150.0) yaw = 150.0;
-        if(pitch < 30.0) pitch = 30.0;
-        if(pitch > 150.0) pitch = 150.0;
+        // Clamp angles to servo limits — full range 0-180°
+        if(yaw < 0.0) yaw = 0.0;
+        if(yaw > 180.0) yaw = 180.0;
+        if(pitch < 0.0) pitch = 0.0;
+        if(pitch > 180.0) pitch = 180.0;
 
         sendServo(yaw,pitch);
     }
@@ -1013,11 +1013,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                      << "° err=" << errorMag << "° gain=" << adaptiveGain
                      << " -> Yaw=" << yawDeg << "° Pitch=" << pitchDeg << "°" << std::endl;
             
-            // Safety limits
-            if (yawDeg < 30.0) yawDeg = 30.0;
-            if (yawDeg > 150.0) yawDeg = 150.0;
-            if (pitchDeg < 30.0) pitchDeg = 30.0;
-            if (pitchDeg > 150.0) pitchDeg = 150.0;
+            // Safety limits — full servo range 0-180°
+            if (yawDeg < 0.0) yawDeg = 0.0;
+            if (yawDeg > 180.0) yawDeg = 180.0;
+            if (pitchDeg < 0.0) pitchDeg = 0.0;
+            if (pitchDeg > 180.0) pitchDeg = 180.0;
             
             // Apply exponential smoothing
             yawDeg = SMOOTHING_FACTOR * yawDeg + (1.0 - SMOOTHING_FACTOR) * lastYawDeg;

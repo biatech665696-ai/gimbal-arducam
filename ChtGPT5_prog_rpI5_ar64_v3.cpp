@@ -1097,6 +1097,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
         }
         
+        // Raw-arrow state: declared before if/else so both branches can access
+        static double prevRawX = -1, prevRawY = -1;
+        static double smoothDX = 0, smoothDY = 0;
+        static int skippedFrames = 1;
+
         // Draw centroid if valid - make it more visible
         if (d.valid) {
             int tx = static_cast<int>(d.x);
@@ -1130,17 +1135,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
 
             // === СТРЕЛКА 2: прирост координат (зелёная) ===
-            static double prevRawX = -1, prevRawY = -1;
-            static double smoothDX = 0, smoothDY = 0;
             if (prevRawX > 0) {
-                double rawDX = d.x - prevRawX;
-                double rawDY = d.y - prevRawY;
-                // Сглаживаем чтобы убрать шум одного кадра
+                // Делим на количество пропущенных кадров → скорость за 1 кадр
+                double rawDX = (d.x - prevRawX) / skippedFrames;
+                double rawDY = (d.y - prevRawY) / skippedFrames;
                 smoothDX = 0.5 * rawDX + 0.5 * smoothDX;
                 smoothDY = 0.5 * rawDY + 0.5 * smoothDY;
                 double rawMag = std::sqrt(smoothDX * smoothDX + smoothDY * smoothDY);
-                if (rawMag > 0.5) {  // порог 0.5 пикселя
-                    const double RAW_SCALE = 8.0;   // пикселей на пиксель/кадр
+                if (rawMag > 0.5) {
+                    const double RAW_SCALE = 8.0;
                     const double RAW_MAX   = 150.0;
                     double arrowLen = std::min(rawMag * RAW_SCALE, RAW_MAX);
                     int ax = tx + static_cast<int>(smoothDX / rawMag * arrowLen);
@@ -1155,6 +1158,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
             prevRawX = d.x;
             prevRawY = d.y;
+            skippedFrames = 1;  // сброс счётчика
+        } else {
+            skippedFrames++;  // считаем кадры без детекции
         }
         
         // Draw center crosshair (use actual frame dimensions, not constants)

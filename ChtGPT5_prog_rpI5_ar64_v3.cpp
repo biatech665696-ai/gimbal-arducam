@@ -1038,9 +1038,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (pitchDeg < 0.0) pitchDeg = 0.0;
             if (pitchDeg > 180.0) pitchDeg = 180.0;
             
-            // Apply exponential smoothing
-            yawDeg = SMOOTHING_FACTOR * yawDeg + (1.0 - SMOOTHING_FACTOR) * lastYawDeg;
-            pitchDeg = SMOOTHING_FACTOR * pitchDeg + (1.0 - SMOOTHING_FACTOR) * lastPitchDeg;
+            // Пропорциональное движение к цели: шаг = PROP_GAIN * ошибка, но не более MAX_STEP
+            // Далеко → большой шаг (быстро догоняет), близко → маленький (плавно, без колебаний)
+            const double PROP_GAIN = 0.7;   // 70% ошибки за кадр
+            const double MAX_STEP  = 15.0;  // max градусов за кадр
+            double yawError   = yawDeg   - lastYawDeg;
+            double pitchError = pitchDeg - lastPitchDeg;
+            yawDeg   = lastYawDeg   + std::max(-MAX_STEP, std::min(MAX_STEP, PROP_GAIN * yawError));
+            pitchDeg = lastPitchDeg + std::max(-MAX_STEP, std::min(MAX_STEP, PROP_GAIN * pitchError));
             
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;

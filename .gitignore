@@ -1,13 +1,27 @@
-# Compiled binaries
+# Compiled binaries (no extension = executable)
 ChtGPT5_prog_rpI5_ar64_v3
 ChtGPT5_prog_rpI5_ar64_v4*
+motion_tracking_30fps2_11_11_25
+new_test_arducam64_1
+test_camera
+test_rpicam_still
+test_rpicam_vid
+rpicam-test/rpicam-test
+rpicam-test/rpicam-test-without-daemon
+cpp
+
+# Raw frame captures
+raw_capture/
+
+# Object files
 *.o
 *.out
 a.out
-
-# Build artifacts
-build/
 *.d
+
+# Python cache
+__pycache__/
+*.pyc
 
 # Editor files
 .vscode/

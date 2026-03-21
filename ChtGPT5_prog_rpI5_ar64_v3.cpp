@@ -1111,27 +1111,50 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             cv::line(display, cv::Point(tx, ty - 25), cv::Point(tx, ty + 25),
                     cv::Scalar(255, 0, 0), 2);
 
-            // === СТРЕЛКА НАПРАВЛЕНИЯ ДВИЖЕНИЯ ===
-            // s.wtheta > 0 → объект движется вправо в кадре
-            // s.wphi   > 0 → объект движется вниз в кадре
-            double velX = s.wtheta;  // рад/с по горизонтали
-            double velY = s.wphi;    // рад/с по вертикали
+            // === СТРЕЛКА 1: скорость Калмана (cyan) ===
+            double velX = s.wtheta;
+            double velY = s.wphi;
             double velMag = std::sqrt(velX * velX + velY * velY);
-            if (velMag > 0.01) {  // рисуем только если есть реальное движение
-                const double ARROW_SCALE = 800.0;   // пикселей на рад/с
-                const double ARROW_MAX   = 150.0;   // макс. длина стрелки (px)
+            if (velMag > 0.01) {
+                const double ARROW_SCALE = 800.0;
+                const double ARROW_MAX   = 150.0;
                 double arrowLen = std::min(velMag * ARROW_SCALE, ARROW_MAX);
                 int ax = tx + static_cast<int>(velX / velMag * arrowLen);
                 int ay = ty + static_cast<int>(velY / velMag * arrowLen);
-                // Жёлтая стрелка с толщиной 3
                 cv::arrowedLine(display, cv::Point(tx, ty), cv::Point(ax, ay),
                                cv::Scalar(0, 255, 255), 3, cv::LINE_AA, 0, 0.3);
-                // Скорость подписываем рядом
                 std::ostringstream velStr;
-                velStr << std::fixed << std::setprecision(2) << velMag << " r/s";
+                velStr << "K:" << std::fixed << std::setprecision(2) << velMag << "r/s";
                 cv::putText(display, velStr.str(), cv::Point(ax + 5, ay - 5),
-                           cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 255), 1);
+                           cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 255, 255), 1);
             }
+
+            // === СТРЕЛКА 2: прирост координат (зелёная) ===
+            static double prevRawX = -1, prevRawY = -1;
+            static double smoothDX = 0, smoothDY = 0;
+            if (prevRawX > 0) {
+                double rawDX = d.x - prevRawX;
+                double rawDY = d.y - prevRawY;
+                // Сглаживаем чтобы убрать шум одного кадра
+                smoothDX = 0.5 * rawDX + 0.5 * smoothDX;
+                smoothDY = 0.5 * rawDY + 0.5 * smoothDY;
+                double rawMag = std::sqrt(smoothDX * smoothDX + smoothDY * smoothDY);
+                if (rawMag > 0.5) {  // порог 0.5 пикселя
+                    const double RAW_SCALE = 8.0;   // пикселей на пиксель/кадр
+                    const double RAW_MAX   = 150.0;
+                    double arrowLen = std::min(rawMag * RAW_SCALE, RAW_MAX);
+                    int ax = tx + static_cast<int>(smoothDX / rawMag * arrowLen);
+                    int ay = ty + static_cast<int>(smoothDY / rawMag * arrowLen);
+                    cv::arrowedLine(display, cv::Point(tx, ty), cv::Point(ax, ay),
+                                   cv::Scalar(0, 200, 0), 3, cv::LINE_AA, 0, 0.3);
+                    std::ostringstream rawStr;
+                    rawStr << "R:" << std::fixed << std::setprecision(1) << rawMag << "px";
+                    cv::putText(display, rawStr.str(), cv::Point(ax + 5, ay + 15),
+                               cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 200, 0), 1);
+                }
+            }
+            prevRawX = d.x;
+            prevRawY = d.y;
         }
         
         // Draw center crosshair (use actual frame dimensions, not constants)

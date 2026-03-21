@@ -986,8 +986,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Adaptive gain: высокий когда объект далеко от центра, низкий когда близко
             // Это позволяет быстро догонять и не перелетать когда уже рядом
             double errorMag = std::sqrt(thetaDeg * thetaDeg + phiDeg * phiDeg);
-            const double GAIN_MIN = 1.2;   // gain когда объект в центре
-            const double GAIN_MAX = 3.0;   // gain когда объект далеко
+            const double GAIN_MIN = 1.5;   // gain когда объект в центре
+            const double GAIN_MAX = 4.0;   // gain когда объект далеко
             const double ERROR_MAX = 20.0; // угол (°) при котором достигается max gain
             double adaptiveGain = GAIN_MIN + (GAIN_MAX - GAIN_MIN) * std::min(errorMag / ERROR_MAX, 1.0);
             

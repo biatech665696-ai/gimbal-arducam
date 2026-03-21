@@ -861,7 +861,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double lastPitchDeg = 90.0;
     double lastSentYawDeg = 90.0;
     double lastSentPitchDeg = 90.0;
-    const double SMOOTHING_FACTOR = 0.35;
+    const double SMOOTHING_FACTOR = 0.20;
     const double SERVO_DEADBAND = 0.2;
     // Счётчик кадров стабилизации после движения серво
     // Пока > 0: подавляем детекцию + быстрое переобучение фона
@@ -1005,11 +1005,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             
             yawDeg = 90.0 - (thetaDeg * adaptiveGain);
             // Компенсация люфта горизонт. серво: преднатяг по направлению движения
-            // (используем скорость Калмана, а не позицию относительно 90°,
-            //  чтобы избежать скачка при пересечении центра)
-            if (s.wtheta > 0.001) {
+            // Порог 0.05 рад/с — не реагируем на мелкий шум Калмана
+            if (s.wtheta > 0.05) {
                 yawDeg -= YAW_BACKLASH;  // движется влево → тянем влево
-            } else if (s.wtheta < -0.001) {
+            } else if (s.wtheta < -0.05) {
                 yawDeg += YAW_BACKLASH;  // движется вправо → тянем вправо
             }
             // Гравитационная компенсация: серво провисает когда камера смотрит вверх
@@ -1018,10 +1017,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double gravityComp = (rawPitchDeg - 90.0) * PITCH_GRAVITY_COMP;
             pitchDeg = rawPitchDeg + gravityComp;
             // Компенсация люфта pitch: преднатяг по направлению движения
-            // При движении вверх (wphi < 0 → pitchDeg растёт) — дополнительный натяг
-            if (s.wphi < -0.001) {
+            // Порог 0.05 рад/с — не реагируем на мелкий шум Калмана
+            if (s.wphi < -0.05) {
                 pitchDeg += PITCH_BACKLASH;  // движется вверх
-            } else if (s.wphi > 0.001) {
+            } else if (s.wphi > 0.05) {
                 pitchDeg -= PITCH_BACKLASH;  // движется вниз
             }
             

@@ -63,6 +63,7 @@ constexpr bool kVerboseFrameLoopLogs = true;
 constexpr double SYSTEM_DELAY   = 0.045;  // Системная задержка горизонт. 45мс
 constexpr double SYSTEM_DELAY_V = 0.090;  // Вертикальная задержка — больше: серво медленнее по питчу
 constexpr double PITCH_GRAVITY_COMP = 0.15; // Компенсация гравитации: доп. % угла при наклоне вверх
+constexpr double PITCH_BACKLASH = 3.0;        // Компенсация люфта серво (°): преднатяг вверх против гравитации
 constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)
@@ -1007,6 +1008,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double rawPitchDeg = 90.0 - (phiDeg * adaptiveGain);
             double gravityComp = (rawPitchDeg - 90.0) * PITCH_GRAVITY_COMP;
             pitchDeg = rawPitchDeg + gravityComp;
+            // Компенсация люфта: когда серво смотрит вверх (pitchDeg < 90),
+            // гравитация + зазор в шестернях мешают дотянуться до команды.
+            // Вычитаем фиксированный преднатяг чтобы серво упёрлось в нужную точку.
+            if (pitchDeg < 90.0) {
+                pitchDeg -= PITCH_BACKLASH;
+            }
             
             // Debug output
             std::cout << "theta=" << thetaDeg << "° phi=" << phiDeg 

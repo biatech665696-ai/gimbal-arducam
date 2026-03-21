@@ -1,0 +1,46 @@
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@1.602] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@1.602] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@1.602] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+Traceback (most recent call last):
+  File "/home/bia/projects/motion_tracking_30fps3_24_11_25.py", line 52, in <module>
+    s#ock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    ^
+NameError: name 's' is not defined. Did you mean: 'os'?
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.305] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.306] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.307] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.291] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.291] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.291] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.351] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.352] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.352] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.384] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.385] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.385] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.266] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.266] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.266] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.278] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.278] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.278] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.292] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.293] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.293] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.279] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.279] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.279] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created
+bia@raspberrypi:~ $ /usr/bin/python /home/bia/projects/motion_tracking_30fps3_24_11_25.py
+[ WARN:0@0.291] global cap_gstreamer.cpp:2839 handleMessage OpenCV | GStreamer warning: Embedded video playback halted; module v4l2src0 reported: Failed to allocate required memory.
+[ WARN:0@0.291] global cap_gstreamer.cpp:1698 open OpenCV | GStreamer warning: unable to start pipeline
+[ WARN:0@0.291] global cap_gstreamer.cpp:1173 isPipelinePlaying OpenCV | GStreamer warning: GStreamer: pipeline have not been created

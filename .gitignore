@@ -1,0 +1,15 @@
+# Compiled binaries
+ChtGPT5_prog_rpI5_ar64_v3
+ChtGPT5_prog_rpI5_ar64_v4*
+*.o
+*.out
+a.out
+
+# Build artifacts
+build/
+*.d
+
+# Editor files
+.vscode/
+*.swp
+*~

@@ -1008,11 +1008,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double rawPitchDeg = 90.0 - (phiDeg * adaptiveGain);
             double gravityComp = (rawPitchDeg - 90.0) * PITCH_GRAVITY_COMP;
             pitchDeg = rawPitchDeg + gravityComp;
-            // Компенсация люфта: когда серво смотрит вверх (pitchDeg < 90),
+            // Компенсация люфта: когда серво смотрит вверх (pitchDeg > 90),
             // гравитация + зазор в шестернях мешают дотянуться до команды.
-            // Вычитаем фиксированный преднатяг чтобы серво упёрлось в нужную точку.
-            if (pitchDeg < 90.0) {
-                pitchDeg -= PITCH_BACKLASH;
+            // Добавляем преднатяг чтобы серво упёрлось в нужную точку.
+            if (pitchDeg > 90.0) {
+                pitchDeg += PITCH_BACKLASH;
             }
             
             // Debug output

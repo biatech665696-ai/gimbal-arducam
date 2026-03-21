@@ -60,8 +60,8 @@ constexpr bool kVerboseTrackingLogs = true;
 constexpr bool kVerboseFrameLoopLogs = true;
 
 // Predictive control parameters (integrated from ChatGPT5 algorithm)
-constexpr double SYSTEM_DELAY   = 0.045;  // Системная задержка горизонт. 45мс
-constexpr double SYSTEM_DELAY_V = 0.090;  // Вертикальная задержка — больше: серво медленнее по питчу
+constexpr double SYSTEM_DELAY   = 0.020;  // Системная задержка горизонт. (уменьшена — было перелётание)
+constexpr double SYSTEM_DELAY_V = 0.040;  // Вертикальная задержка (уменьшена)
 constexpr double PITCH_GRAVITY_COMP = 0.15; // Компенсация гравитации: доп. % угла при наклоне вверх
 constexpr double PITCH_BACKLASH = 20.0;       // Компенсация люфта серво (°): преднатяг вверх против гравитации
 constexpr double YAW_BACKLASH   = 5.0;        // Компенсация люфта горизонт. серво (°): преднатяг в сторону от центра
@@ -1004,22 +1004,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double adaptiveGain = GAIN_MIN + (GAIN_MAX - GAIN_MIN) * std::min(errorMag / ERROR_MAX, 1.0);
             
             yawDeg = 90.0 - (thetaDeg * adaptiveGain);
-            // Компенсация люфта горизонт. серво: преднатяг в сторону отклонения
-            if (yawDeg > 90.0) {
-                yawDeg += YAW_BACKLASH;
-            } else if (yawDeg < 90.0) {
-                yawDeg -= YAW_BACKLASH;
+            // Компенсация люфта горизонт. серво: преднатяг по направлению движения
+            // (используем скорость Калмана, а не позицию относительно 90°,
+            //  чтобы избежать скачка при пересечении центра)
+            if (s.wtheta > 0.001) {
+                yawDeg -= YAW_BACKLASH;  // движется влево → тянем влево
+            } else if (s.wtheta < -0.001) {
+                yawDeg += YAW_BACKLASH;  // движется вправо → тянем вправо
             }
             // Гравитационная компенсация: серво провисает когда камера смотрит вверх
             // pitchDeg > 90 → камера смотрит вверх → добавляем extra угол
             double rawPitchDeg = 90.0 - (phiDeg * adaptiveGain);
             double gravityComp = (rawPitchDeg - 90.0) * PITCH_GRAVITY_COMP;
             pitchDeg = rawPitchDeg + gravityComp;
-            // Компенсация люфта: когда серво смотрит вверх (pitchDeg > 90),
-            // гравитация + зазор в шестернях мешают дотянуться до команды.
-            // Добавляем преднатяг чтобы серво упёрлось в нужную точку.
-            if (pitchDeg > 90.0) {
-                pitchDeg += PITCH_BACKLASH;
+            // Компенсация люфта pitch: преднатяг по направлению движения
+            // При движении вверх (wphi < 0 → pitchDeg растёт) — дополнительный натяг
+            if (s.wphi < -0.001) {
+                pitchDeg += PITCH_BACKLASH;  // движется вверх
+            } else if (s.wphi > 0.001) {
+                pitchDeg -= PITCH_BACKLASH;  // движется вниз
             }
             
             // Debug output

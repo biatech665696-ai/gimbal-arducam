@@ -130,13 +130,13 @@ constexpr long period_ns = 20000000;   // 20 ms period in nanoseconds
 constexpr long min_ns = 1000000;       // 1 ms  -> 0°
 constexpr long max_ns = 2000000;       // 2 ms  -> 180°
 constexpr float SERVO_CENTER_ANGLE = 90.0f;  // Центральное положение серво (нейтраль)
-constexpr bool kVerboseServoLogs = false;
-constexpr bool kVerboseTrackingLogs = false;
-constexpr bool kVerboseFrameLoopLogs = false;
+constexpr bool kVerboseServoLogs = true;  // ENABLED for debugging
+constexpr bool kVerboseTrackingLogs = true;
+constexpr bool kVerboseFrameLoopLogs = true;
 
 // Predictive control parameters (integrated from ChatGPT5 algorithm)
 constexpr double SYSTEM_DELAY = 0.35;   // Реальная задержка: 1/FPS + settle + MIN_DETECTIONS/FPS ≈ 350ms
-constexpr bool USE_PREDICTIVE_CONTROL = false;  // Отключено: скорость из Kalman ненадёжна, вызывает осцилляции
+constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)
 const double CX = 960.0;   // Optical center X (half of 1920)
@@ -256,20 +256,21 @@ static void shutdownSysfsPwm() {
 
 void setServoAngle(int channel, float angle_deg)
 {
+    std::cout << "[SERVO CMD] channel=" << channel << " angle=" << angle_deg << "°";
+    
     if(angle_deg < 0.0f) angle_deg = 0.0f;
     if(angle_deg > 180.0f) angle_deg = 180.0f;
-
-    // Skip write if angle unchanged (reduces sysfs I/O)
-    static float lastAngle[4] = {-1.f, -1.f, -1.f, -1.f};
-    if (channel >= 0 && channel < 4 && std::abs(angle_deg - lastAngle[channel]) < 0.05f)
-        return;
-    if (channel >= 0 && channel < 4) lastAngle[channel] = angle_deg;
 
     const long duty_cycle_ns = min_ns + static_cast<long>((angle_deg / 180.0f) * (max_ns - min_ns));
     std::string path = getPwmPath(channel) + "/duty_cycle";
     
-    if (!writeToFile(path, std::to_string(duty_cycle_ns))) {
-        std::cerr << "[SERVO] WRITE FAILED channel=" << channel << " path=" << path << std::endl;
+    std::cout << " duty=" << duty_cycle_ns << "ns path=" << path << std::endl;
+    
+    bool success = writeToFile(path, std::to_string(duty_cycle_ns));
+    if (!success) {
+        std::cerr << "  ✗✗✗ SERVO WRITE FAILED! Check permissions on " << path << std::endl;
+    } else {
+        std::cout << "  ✓ Servo command sent successfully" << std::endl;
     }
 }
 
@@ -278,6 +279,7 @@ void setServoAngle(int channel, float angle_deg)
 struct FrameData
 {
     cv::Mat frame;
+    cv::Mat smallGray;  // 0.25x grayscale + blur — предобработан в cameraThread
     double timestamp;
 };
 
@@ -373,16 +375,14 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
     Detection d;
     d.valid = false;
 
-    // Convert to grayscale
+    // Кадр уже grayscale + blur (выполнено в cameraThread)
     cv::Mat gray;
     if (roi.channels() > 1) {
         cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
+        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.0);
     } else {
         gray = roi.clone();
     }
-    
-    // Apply Gaussian blur to reduce noise
-    cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.0);
 
     // CLAHE: адаптивная нормализация контраста — усиливает слабые движения
     // без увеличения шума. Работает локально (8x8 тайлы), не глобально.
@@ -405,7 +405,7 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
 
     // Find contours
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(fgMask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
     // Collect and filter significant moving objects
     std::vector<std::pair<double, int>> validObjects;
@@ -645,31 +645,66 @@ public:
         double dt = t - lastTime;
         lastTime = t;
 
-        if (dt < 0.001) dt = 0.001;
-        if (dt > 0.1)   dt = 0.1;  // cap: не интегрировать за паузы
+        if (dt < 0.001) dt = 0.001;  // Prevent division by zero
 
+        // Prediction step (F * x)
+        // x = F * x where F is the state transition matrix
+        // New position = old position + velocity * dt
+        x[0] = x[0] + x[2] * dt;  // theta_new = theta_old + wtheta * dt
+        x[1] = x[1] + x[3] * dt;  // phi_new = phi_old + wphi * dt
+        // velocities stay the same (x[2] and x[3])
+
+        // Prediction covariance: P = F * P * F^T + Q (simplified)
+        // Just increase uncertainty with time
+        P[0] += dt * dt * 0.01;  // Position uncertainty increases
+        P[1] += dt * dt * 0.01;
+        P[2] += 0.001;  // Velocity uncertainty
+        P[3] += 0.001;
+
+        // Update step (only if valid measurement)
         if (valid)
         {
-            // Экспоненциальное сглаживание позиции (alpha=0.5)
-            const double alpha = 0.5;
-            x[0] = alpha * theta + (1.0 - alpha) * x[0];
-            x[1] = alpha * phi   + (1.0 - alpha) * x[1];
+            // Measurement model: z = H * x where H = [1 0 0 0; 0 1 0 0]
+            // Innovation: y = z - H * x
+            double y0 = theta - x[0];  // Innovation for theta
+            double y1 = phi - x[1];     // Innovation for phi
 
-            // Скорость — производная сглаженной позиции
-            x[2] = 0.7 * x[2] + 0.3 * ((x[0] - (x[0] - alpha*(theta - x[0]))) / dt);
-            x[3] = 0.7 * x[3] + 0.3 * ((x[1] - (x[1] - alpha*(phi   - x[1]))) / dt);
+            // Measurement noise covariance R
+            double R = 1e-5;
 
-            // Ограничение скорости
-            const double MAX_VEL = 2.0;
-            x[2] = std::max(-MAX_VEL, std::min(MAX_VEL, x[2]));
-            x[3] = std::max(-MAX_VEL, std::min(MAX_VEL, x[3]));
+            // Kalman gain: K = P * H^T * (H * P * H^T + R)^-1
+            // Simplified for diagonal P and simple H
+            double K0 = P[0] / (P[0] + R);
+            double K1 = P[1] / (P[1] + R);
+
+            // State update: x = x + K * y
+            x[0] = x[0] + K0 * y0;
+            x[1] = x[1] + K1 * y1;
+
+            // Update velocities based on innovation (simple derivative)
+            if (dt > 0) {
+                x[2] = 0.9 * x[2] + 0.1 * (y0 / dt);  // Exponential smoothing
+                x[3] = 0.9 * x[3] + 0.1 * (y1 / dt);
+            }
+
+            // Covariance update: P = (I - K * H) * P
+            P[0] = (1.0 - K0) * P[0];
+            P[1] = (1.0 - K1) * P[1];
         }
         else
         {
-            // Нет детекции: держим позицию, гасим скорость
-            // НЕ обновляем x[0]/x[1] — серво держит последнюю известную цель
-            x[2] *= 0.8;
-            x[3] *= 0.8;
+            // When no valid detection, dampen the filter response
+            // Slowly decay velocities to prevent oscillation
+            x[2] = x[2] * 0.95;  // Decay velocity estimates
+            x[3] = x[3] * 0.95;
+            
+            // Slowly move back to center
+            x[0] = x[0] * 0.98;  // Decay theta toward 0
+            x[1] = x[1] * 0.98;  // Decay phi toward 0
+            
+            // Increase uncertainty when no measurement
+            P[0] += 0.01;
+            P[1] += 0.01;
         }
 
         return {x[0], x[1], x[2], x[3]};
@@ -782,6 +817,7 @@ public:
 
 void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 {
+    pthread_setname_np(pthread_self(), "cameraThread");
     cv::VideoCapture cap;
     bool usingRealCamera = false;
     int failureCount = 0;
@@ -909,6 +945,15 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             std::this_thread::sleep_for(std::chrono::milliseconds(22)); // ~45 fps
         }
 
+        // Предобработка в cameraThread пока камера ждёт следующий кадр:
+        // resize + cvtColor + blur переносим сюда, разгружая trackingThread
+        {
+            cv::Mat resized;
+            cv::resize(f.frame, resized, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
+            cv::cvtColor(resized, f.smallGray, cv::COLOR_BGR2GRAY);
+            cv::GaussianBlur(f.smallGray, f.smallGray, cv::Size(3, 3), 1.0);
+        }
+
         f.timestamp=
         chrono::duration<double>(
         chrono::high_resolution_clock::now()
@@ -926,6 +971,7 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
 void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 {
+    pthread_setname_np(pthread_self(), "trackingThread");
     AngleKalman kalman;
     Gimbal gimbal;
 
@@ -1014,19 +1060,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === DETECTION - runs in BOTH FIXED and TRACKING modes ===
         cv::Mat display = f.frame.clone();  // For visualization
 
-        // Resize to 0.25x for fast processing (480x270 instead of 960x540)
-        cv::Mat resized;
-        cv::resize(f.frame, resized, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
-        
-        cv::Mat gray;
-        cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
-
-        // Detect motion on downscaled frame.
+        // resize+cvtColor+blur выполнены в cameraThread — используем готовый smallGray
         // Во время стабилизации сбрасываем внутренние счётчики centroid(),
         // чтобы накопленные за settle-период фоновые срабатывания не прорвались
         // сразу после окончания паузы (петля обратной связи).
         bool doReinitBGS = doReinitNow;  // сброс MOG2 в первый кадр после движения серво
-        Detection d = centroid(gray, 0, 0, bgsLearningRate, cameraSettling, doReinitBGS);
+        Detection d = centroid(f.smallGray, 0, 0, bgsLearningRate, cameraSettling, doReinitBGS);
         
         if (cameraSettling) {
             d.valid = false;
@@ -1049,49 +1088,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             box.y *= 4;
             box.width *= 4;
             box.height *= 4;
-        }
-
-        // ===================================================================
-        // CAPTURE: когда оптический центр кадра (крест) приближается к краю
-        // ROI вокруг объекта — ROI расширяется и захватывает центр.
-        // После захвата: серво держит позицию (d.valid=false), крест
-        // рисуется на объекте. Разблокировка — если объект уходит из ROI.
-        // ===================================================================
-        static cv::Rect objROI(0, 0, 0, 0);
-        static bool   locked   = false;
-        static double locked_x = 0.0;
-        static double locked_y = 0.0;
-        const  int    CAPTURE_MARGIN = 100; // px: расширение ROI навстречу центру
-
-        if (d.valid) {
-            // Вычисляем ROI один раз (повторный вызов нарушает внутр. сглаживание)
-            objROI = computeROI(d.x, d.y, f.frame.cols, f.frame.rows, d.box_w, d.box_h);
-
-            // Расширяем ROI в сторону центра
-            cv::Rect expanded = objROI;
-            expanded.x      -= CAPTURE_MARGIN;
-            expanded.y      -= CAPTURE_MARGIN;
-            expanded.width  += 2 * CAPTURE_MARGIN;
-            expanded.height += 2 * CAPTURE_MARGIN;
-            expanded.x = std::max(0, expanded.x);
-            expanded.y = std::max(0, expanded.y);
-            if (expanded.x + expanded.width  > f.frame.cols) expanded.width  = f.frame.cols - expanded.x;
-            if (expanded.y + expanded.height > f.frame.rows) expanded.height = f.frame.rows - expanded.y;
-
-            bool cxIn = ((int)cx >= expanded.x && (int)cx < expanded.x + expanded.width);
-            bool cyIn = ((int)cy >= expanded.y && (int)cy < expanded.y + expanded.height);
-
-            if (cxIn && cyIn) {
-                // Центр вошёл в расширенный ROI — захват
-                locked   = true;
-                locked_x = d.x;
-                locked_y = d.y;
-                d.valid  = false; // серво держит позицию, не дёргается
-            } else {
-                locked = false;   // центр далеко — нормальное слежение
-            }
-        } else {
-            locked = false;
         }
 
         double theta=0;
@@ -1135,8 +1131,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         
         // TRACKING MODE: Follow detected objects
         if (d.valid) {
+            double thetaDeg = (s.theta * 180.0 / M_PI);
+            double phiDeg   = (s.phi   * 180.0 / M_PI);
 
             // Kalman-сглаженная ошибка в пикселях (убирает дрожание детекции)
+            // SYSTEM_DELAY=0.045: минимальное предсказание вперёд
             double ex = s.theta * F;  // >0 объект справа
             double ey = s.phi   * F;  // >0 объект снизу
 
@@ -1144,20 +1143,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double norm_ex = ex / cx;
             double norm_ey = ey / cy;
 
-            // Абсолютное позиционирование: целевой угол = центр ± ошибка
-            // Нет накопления ошибки, нет инкрементного дрейфа.
-            // MAX_STEP_DEG ограничивает максимальный прыжок за кадр.
-            const double MAX_STEP_DEG = 8.0;  // быстрое сближение: 2 кадра для 15°
-            double targetYaw   = 90.0 - (s.theta * 180.0 / M_PI);
-            double targetPitch = 90.0 - (s.phi   * 180.0 / M_PI);
-            double stepYaw   = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, targetYaw   - lastYawDeg));
-            double stepPitch = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, targetPitch - lastPitchDeg));
+            // Шаг прямо пропорционален расстоянию: MAX_STEP_DEG при объекте у края
+            const double MAX_STEP_DEG = 8.0;
+            double stepYaw   = norm_ex * MAX_STEP_DEG;
+            double stepPitch = norm_ey * MAX_STEP_DEG;
 
-            yawDeg   = lastYawDeg   + stepYaw;
-            pitchDeg = lastPitchDeg + stepPitch;
+            // Применяем шаг к текущей позиции серво
+            // Знаки: объект справа (ex>0) → серво вправо (yaw убывает по нашей конвенции)
+            yawDeg   = lastYawDeg   - stepYaw;
+            pitchDeg = lastPitchDeg - stepPitch;
 
             // Debug output
-            std::cout << "target=(" << targetYaw << "°," << targetPitch << "°)"
+            std::cout << "theta=" << thetaDeg << "° phi=" << phiDeg
+                     << "° err=(" << (int)ex << "," << (int)ey << "px)"
                      << " step=(" << stepYaw << "°," << stepPitch << "°)"
                      << " -> Yaw=" << yawDeg << "° Pitch=" << pitchDeg << "°" << std::endl;
             
@@ -1172,13 +1170,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             
             // Move servos only in TRACKING mode
             if (currentTrackingEnabled) {
+                // Два порога:
+                // > 0.8°: settle 200ms (подавляет детекцию пока камера дрожит).
+                //          БЕЗ reinit: postSettle LR=0.3 быстро адаптирует MOG2
+                //          к небольшому сдвигу без warmup-слепоты.
+                // > 3.0°: settle + полный reinit (фон меняется кардинально).
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
-                if (moveAmount > 3.0) {
+                if (moveAmount > 0.8) {
                     auto t = std::chrono::steady_clock::now();
                     settleUntil     = t + std::chrono::milliseconds(200);
                     postSettleUntil = t + std::chrono::milliseconds(500);
-                    needsBGSReinit  = true;
+                    if (moveAmount > 3.0) {
+                        needsBGSReinit = true;  // полный reinit только при большом прыжке
+                    }
                 }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
@@ -1201,13 +1206,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === VISUALIZATION ===
         
-        // Draw ROI: жёлтый = слежение, зелёный = захвачен
-        if (objROI.width > 0) {
-            cv::Scalar roiColor = locked ? cv::Scalar(0, 255, 0) : cv::Scalar(255, 255, 0);
-            cv::rectangle(display, objROI, roiColor, 3);
-            cv::putText(display, locked ? "LOCKED" : "ROI",
-                       cv::Point(objROI.x + 5, objROI.y + 25),
-                       cv::FONT_HERSHEY_SIMPLEX, 0.8, roiColor, 2);
+        // Draw ROI window if object is detected
+        if (d.valid) {
+            cv::Rect roi = computeROI(d.x, d.y, display.cols, display.rows, d.box_w, d.box_h);
+            cv::rectangle(display, roi, cv::Scalar(255, 255, 0), 3);
+            cv::putText(display, "ROI", cv::Point(roi.x + 5, roi.y + 25),
+                       cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(255, 255, 0), 2);
         }
         
         // Draw bright green rectangles around all detected moving objects with labels
@@ -1226,25 +1230,28 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                        cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 0), 2);
         }
         
-        // Draw centroid (красный) — рисуем всегда пока объект виден или захвачен
-        {
-            bool drawObj = d.valid || locked;
-            double ox = locked ? locked_x : d.x;
-            double oy = locked ? locked_y : d.y;
-            if (drawObj) {
-                cv::circle(display, cv::Point((int)ox, (int)oy), 10, cv::Scalar(0, 0, 255), -1);
-                cv::circle(display, cv::Point((int)ox, (int)oy), 15, cv::Scalar(255, 255, 255), 3);
-                cv::line(display, cv::Point((int)ox - 25, (int)oy), cv::Point((int)ox + 25, (int)oy), cv::Scalar(255, 0, 0), 2);
-                cv::line(display, cv::Point((int)ox, (int)oy - 25), cv::Point((int)ox, (int)oy + 25), cv::Scalar(255, 0, 0), 2);
-            }
+        // Draw centroid if valid - make it more visible
+        if (d.valid) {
+            // Red target marker
+            cv::circle(display, cv::Point(static_cast<int>(d.x), static_cast<int>(d.y)), 
+                      10, cv::Scalar(0, 0, 255), -1);
+            cv::circle(display, cv::Point(static_cast<int>(d.x), static_cast<int>(d.y)), 
+                      15, cv::Scalar(255, 255, 255), 3);
+            // Crosshair on target
+            int tx = static_cast<int>(d.x);
+            int ty = static_cast<int>(d.y);
+            cv::line(display, cv::Point(tx - 25, ty), cv::Point(tx + 25, ty), 
+                    cv::Scalar(255, 0, 0), 2);
+            cv::line(display, cv::Point(tx, ty - 25), cv::Point(tx, ty + 25), 
+                    cv::Scalar(255, 0, 0), 2);
         }
-
-        // Центральный крест: при захвате переезжает к объекту, иначе — центр кадра
-        int cx_int = locked ? (int)locked_x : display.cols / 2;
-        int cy_int = locked ? (int)locked_y : display.rows / 2;
-        cv::line(display, cv::Point(cx_int - 20, cy_int), cv::Point(cx_int + 20, cy_int),
+        
+        // Draw center crosshair (use actual frame dimensions, not constants)
+        int cx_int = display.cols / 2;
+        int cy_int = display.rows / 2;
+        cv::line(display, cv::Point(cx_int - 20, cy_int), cv::Point(cx_int + 20, cy_int), 
                 cv::Scalar(255, 255, 0), 2);
-        cv::line(display, cv::Point(cx_int, cy_int - 20), cv::Point(cx_int, cy_int + 20),
+        cv::line(display, cv::Point(cx_int, cy_int - 20), cv::Point(cx_int, cy_int + 20), 
                 cv::Scalar(255, 255, 0), 2);
         
         // Draw info text with background for better visibility

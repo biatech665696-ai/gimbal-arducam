@@ -272,8 +272,7 @@ void setServoAngle(int channel, float angle_deg)
     } else {
         std::cout << "  ✓ Servo command sent successfully" << std::endl;
     }
-}
-
+}     
 /* =============== DATA STRUCTURES =============== */
 
 struct FrameData

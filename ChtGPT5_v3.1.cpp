@@ -352,8 +352,7 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
     // Полный сброс MOG2 при движении серво
     if (reinitBGS) {
         bgSubtractor = cv::createBackgroundSubtractorMOG2(200, 20, true);
-        // 80ms прогрев — укладывается внутрь settle=200ms, к концу паузы
-        // MOG2 уже готов и не даёт ложных срабатываний после settle.
+        // 80ms прогрев — укладывается внутрь settle=200ms
         warmupUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(80);
     }
     
@@ -361,7 +360,7 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
     static int consecutiveDetections = 0;
     static int consecutiveMisses = 0;
     static std::deque<std::vector<cv::Rect>> boxHistory;  // 9-frame sliding window
-    const int MIN_DETECTIONS = 3;  // показываем объект только после 3 кадров подряд (~0.07с)
+    const int MIN_DETECTIONS = 3;  // 3 кадра подряд — баланс скорости и шумоподавления
     const int MAX_MISSES = 60;
 
     // Сброс счётчиков при стабилизации сервопривода
@@ -1180,9 +1179,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 if (moveAmount > 0.8) {
                     auto t = std::chrono::steady_clock::now();
                     settleUntil     = t + std::chrono::milliseconds(200);
-                    postSettleUntil = t + std::chrono::milliseconds(500);
+                    postSettleUntil = t + std::chrono::milliseconds(400);
                     if (moveAmount > 3.0) {
-                        needsBGSReinit = true;  // полный reinit только при большом прыжке
+                        needsBGSReinit = true;  // полный reinit при движении >3°
                     }
                 }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));

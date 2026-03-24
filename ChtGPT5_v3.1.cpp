@@ -363,11 +363,13 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
     const int MIN_DETECTIONS = 3;  // 3 кадра подряд — баланс скорости и шумоподавления
     const int MAX_MISSES = 60;
 
-    // Сброс счётчиков при стабилизации сервопривода
+    // Сброс счётчиков при стабилизации сервопривода.
+    // lastValidCenter НЕ сбрасывается — spatial gate (150px) должен
+    // оставаться активным после settle, иначе первый шум после паузы
+    // захватывает трекер и серво прыгает на него → шторм помех.
     if (resetCounters) {
         consecutiveDetections = 0;
         consecutiveMisses = 0;
-        lastValidCenter = cv::Point2f(-1, -1);
         boxHistory.clear();
     }
     

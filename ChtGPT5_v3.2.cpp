@@ -1194,7 +1194,38 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
 
         // === VISUALIZATION ===
-        
+
+        // === TRAJECTORY: история точек детекции (последние 60 кадров) ===
+        static std::deque<cv::Point2f> trajHistory;
+        static std::deque<cv::Point2f> servoHistory;  // куда прыгало серво
+        if (d.valid) {
+            trajHistory.push_back(cv::Point2f(d.x, d.y));
+            if (trajHistory.size() > 60) trajHistory.pop_front();
+        }
+
+        // Рисуем траекторию объекта: линии от точки к точке, цвет от синего к красному
+        for (int i = 1; i < (int)trajHistory.size(); i++) {
+            float t = (float)i / trajHistory.size();
+            cv::Scalar col(255 * (1 - t), 0, 255 * t);  // синий→красный
+            cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
+            cv::circle(display, trajHistory[i], 3, col, -1);
+        }
+
+        // Рисуем куда целится серво (предсказанная позиция после predictFuture)
+        // ex, ey уже вычислены выше, рисуем крест в точке предсказания
+        if (d.valid) {
+            double predX = cx + s.theta * F;
+            double predY = cy + s.phi   * F;
+            int px = static_cast<int>(predX);
+            int py = static_cast<int>(predY);
+            if (px > 0 && px < display.cols && py > 0 && py < display.rows) {
+                cv::drawMarker(display, cv::Point(px, py),
+                              cv::Scalar(0, 255, 255), cv::MARKER_CROSS, 20, 2);
+                cv::putText(display, "AIM", cv::Point(px + 12, py - 5),
+                           cv::FONT_HERSHEY_SIMPLEX, 0.45, cv::Scalar(0, 255, 255), 1);
+            }
+        }
+
         // Draw ROI window if object is detected
         if (d.valid) {
             cv::Rect roi = computeROI(d.x, d.y, display.cols, display.rows, d.box_w, d.box_h);

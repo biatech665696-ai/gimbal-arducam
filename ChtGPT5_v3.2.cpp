@@ -1135,7 +1135,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double norm_ey = ey / cy;
 
             // Шаг прямо пропорционален расстоянию: MAX_STEP_DEG при объекте у края
-            const double MAX_STEP_DEG = 8.0;
+            const double MAX_STEP_DEG = 30.0;
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
 

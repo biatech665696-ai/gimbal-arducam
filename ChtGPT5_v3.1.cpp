@@ -1172,18 +1172,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Move servos only in TRACKING mode
             if (currentTrackingEnabled) {
                 // Два порога:
-                // > 0.8°: settle 200ms (подавляет детекцию пока камера дрожит).
-                //          БЕЗ reinit: postSettle LR=0.3 быстро адаптирует MOG2
-                //          к небольшому сдвигу без warmup-слепоты.
-                // > 3.0°: settle + полный reinit (фон меняется кардинально).
+                // > 3.0°: settle 200ms (камера реально дрожит при таком сдвиге).
+                // > 6.0°: settle + полный reinit (фон меняется кардинально).
+                // Было: порог 0.8° — каждая мелкая коррекция вызывала 200мс слепоты.
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
-                if (moveAmount > 0.8) {
+                if (moveAmount > 3.0) {
                     auto t = std::chrono::steady_clock::now();
                     settleUntil     = t + std::chrono::milliseconds(200);
                     postSettleUntil = t + std::chrono::milliseconds(400);
-                    if (moveAmount > 3.0) {
-                        needsBGSReinit = true;  // полный reinit при движении >3°
+                    if (moveAmount > 6.0) {
+                        needsBGSReinit = true;  // полный reinit только при большом прыжке
                     }
                 }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));

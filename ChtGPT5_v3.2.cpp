@@ -1211,11 +1211,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // Рисуем траекторию объекта: линии от точки к точке, цвет от синего к красному
         // Пропускаем отрезок если любая из двух точек невалидна (-1,-1)
-        for (int i = 1; i < (int)trajHistory.size(); i++) {
-            if (trajHistory[i-1].x < 0 || trajHistory[i].x < 0) continue;
-            float t = (float)i / trajHistory.size();
+        for (int i = 0; i < (int)trajHistory.size(); i++) {
+            if (trajHistory[i].x < 0) continue;
+            float t = (float)i / std::max((int)trajHistory.size() - 1, 1);
             cv::Scalar col(255 * (1 - t), 0, 255 * t);  // синий→красный
-            cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
+            // Линия от предыдущей валидной точки
+            if (i > 0 && trajHistory[i-1].x >= 0) {
+                cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
+            }
+            // Круг всегда для каждой валидной точки
             cv::circle(display, trajHistory[i], 3, col, -1);
         }
 

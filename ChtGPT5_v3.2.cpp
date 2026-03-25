@@ -1170,11 +1170,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 // > 3.0°: settle + полный reinit (фон меняется кардинально).
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
-                if (moveAmount > 0.8) {
+                if (moveAmount > 3.0) {
                     auto t = std::chrono::steady_clock::now();
                     settleUntil     = t + std::chrono::milliseconds(200);
                     postSettleUntil = t + std::chrono::milliseconds(500);
-                    if (moveAmount > 3.0) {
+                    if (moveAmount > 6.0) {
                         needsBGSReinit = true;  // полный reinit только при большом прыжке
                     }
                 }

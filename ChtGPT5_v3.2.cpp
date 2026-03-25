@@ -135,7 +135,7 @@ constexpr bool kVerboseTrackingLogs = true;
 constexpr bool kVerboseFrameLoopLogs = true;
 
 // Predictive control parameters (integrated from ChatGPT5 algorithm)
-constexpr double SYSTEM_DELAY = 0.35;   // Реальная задержка: 1/FPS + settle + MIN_DETECTIONS/FPS ≈ 350ms
+constexpr double SYSTEM_DELAY = 0.20;   // Реальная задержка: servoSettleFrames/FPS = 9/45 ≈ 200ms
 constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)

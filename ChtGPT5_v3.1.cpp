@@ -1025,14 +1025,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Таймеры реального времени (не зависят от FPS)
         auto now = std::chrono::steady_clock::now();
         bool cameraSettling   = (now < settleUntil);
-        bool postSettleActive = (!cameraSettling && now < postSettleUntil);
         bool doReinitNow = needsBGSReinit;
         needsBGSReinit = false;
         if (cameraSettling) {
             bgsLearningRate = 0.5;
-        } else if (postSettleActive) {
-            bgsLearningRate = 0.3;
         }
+        // postSettle LR=0.3 удалён: при LR=0.3 за ~150мс (7 кадров × 0.3)
+        // MOG2 поглощал объект как фон сразу после каждого шага серво.
+        // Это и было причиной пауз 3-7с в TRACKING — каждый шаг → слепота.
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;

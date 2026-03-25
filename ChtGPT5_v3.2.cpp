@@ -683,8 +683,8 @@ public:
 
             // Update velocities based on innovation (simple derivative)
             if (dt > 0) {
-                x[2] = 0.9 * x[2] + 0.1 * (y0 / dt);  // Exponential smoothing
-                x[3] = 0.9 * x[3] + 0.1 * (y1 / dt);
+                x[2] = 0.85 * x[2] + 0.15 * (y0 / dt);  // Exponential smoothing
+                x[3] = 0.85 * x[3] + 0.15 * (y1 / dt);
             }
 
             // Covariance update: P = (I - K * H) * P

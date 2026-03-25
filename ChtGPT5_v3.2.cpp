@@ -1176,7 +1176,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 if (moveAmount > 0.8) {
                     auto t = std::chrono::steady_clock::now();
                     settleUntil     = t + std::chrono::milliseconds(100);
-                    postSettleUntil = t + std::chrono::milliseconds(400);
+                    postSettleUntil = t + std::chrono::milliseconds(600);
                     if (moveAmount > 3.0) {
                         needsBGSReinit = true;  // полный reinit только при большом прыжке
                     }

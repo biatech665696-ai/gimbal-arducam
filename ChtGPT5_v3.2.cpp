@@ -1206,34 +1206,32 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === VISUALIZATION ===
 
-        // === TRAJECTORY: история кандидатов детекции (последние 80 кадров) ===
-        // Используем candidate (до MIN_DETECTIONS фильтра) — даёт непрерывную линию.
-        // Очищаем при шаге серво — убираем стale точки из старой позиции камеры.
+        // === TRAJECTORY: центроиды всех обнаруженных движущихся объектов ===
+        // Используем all_boxes (уже в 1x координатах) — работает независимо от
+        // пространственного гейта и MIN_DETECTIONS.
         static std::deque<cv::Point2f> trajHistory;
         static std::deque<cv::Point2f> servoHistory;
 
-        // Очистить при шаге серво (позиция камеры изменилась)
-        if (servoSettleFrames == 9) {  // только что выставили settle = первый кадр шага
-            trajHistory.clear();
-        }
-
-        // Масштабируем candidate из 0.25x → 1x
-        if (d.has_candidate && !cameraSettling) {
-            trajHistory.push_back(cv::Point2f(d.cand_x * 4.0f, d.cand_y * 4.0f));
-        } else if (!d.has_candidate && !cameraSettling && !trajHistory.empty()
-                   && trajHistory.back().x >= 0) {
+        if (!d.all_boxes.empty()) {
+            // Берём центроид самого большого бокса
+            cv::Rect biggest = *std::max_element(d.all_boxes.begin(), d.all_boxes.end(),
+                [](const cv::Rect& a, const cv::Rect& b){ return a.area() < b.area(); });
+            cv::Point2f pt(biggest.x + biggest.width / 2.0f,
+                           biggest.y + biggest.height / 2.0f);
+            trajHistory.push_back(pt);
+        } else if (!trajHistory.empty() && trajHistory.back().x >= 0) {
             trajHistory.push_back(cv::Point2f(-1, -1));  // разрыв при потере
         }
         if (trajHistory.size() > 80) trajHistory.pop_front();
 
-        // Рисуем траекторию: линии между соседними валидными точками
+        // Рисуем траекторию: синий→красный
         for (int i = 0; i < (int)trajHistory.size(); i++) {
             if (trajHistory[i].x < 0) continue;
             float t = (float)i / std::max((int)trajHistory.size() - 1, 1);
-            cv::Scalar col(255 * (1 - t), 0, 255 * t);  // синий→красный
+            cv::Scalar col(255 * (1 - t), 0, 255 * t);
             if (i > 0 && trajHistory[i-1].x >= 0)
                 cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
-            cv::circle(display, trajHistory[i], 3, col, -1);
+            cv::circle(display, trajHistory[i], 4, col, -1);
         }
 
         // Рисуем куда целится серво (предсказанная позиция после predictFuture)

@@ -693,14 +693,11 @@ public:
         }
         else
         {
-            // When no valid detection, dampen the filter response
-            // Slowly decay velocities to prevent oscillation
-            x[2] = x[2] * 0.95;  // Decay velocity estimates
-            x[3] = x[3] * 0.95;
-            
-            // Slowly move back to center
-            x[0] = x[0] * 0.98;  // Decay theta toward 0
-            x[1] = x[1] * 0.98;  // Decay phi toward 0
+            // When no valid detection (e.g. during servo settle):
+            // Keep velocity and position as-is so predictFuture() can extrapolate
+            // the true object trajectory without degradation.
+            // B: убрали x[2]*=0.95 — скорость не деградирует во время settle
+            // C: убрали x[0]*=0.98 — позиция не занижается к центру
             
             // Increase uncertainty when no measurement
             P[0] += 0.01;

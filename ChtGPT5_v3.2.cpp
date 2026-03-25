@@ -986,9 +986,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     // Пока > 0: подавляем детекцию + быстрое переобучение фона
     int servoSettleFrames = 0;
     bool needsBGSReinit = false;
-    // Таймеры settle/postSettle в реальном времени (не зависят от FPS)
-    auto settleUntil      = std::chrono::steady_clock::now();
-    auto postSettleUntil  = std::chrono::steady_clock::now();
 
     while(run)
     {
@@ -1010,16 +1007,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // learningRate for BGS: 1.0 on mode change (instant reset), 0.05 for
         // first 60 frames (fast warm-up at new static position), 0.01 normal
         double bgsLearningRate = 0.01;
-        // Таймеры реального времени (не зависят от FPS)
-        auto now = std::chrono::steady_clock::now();
-        bool cameraSettling   = (now < settleUntil);
+        // Frame-based settle: 9 кадров с LR=0.7 после каждого шага серво.
+        // Быстро учит новый фон за 9 кадров (~200ms при 45fps), потом LR=0.01.
+        // Нет postSettle с LR=0.3 — объект не поглощается в фон.
+        bool cameraSettling = (servoSettleFrames > 0);
+        if (cameraSettling) {
+            bgsLearningRate = 0.7;
+            servoSettleFrames--;
+        }
         bool doReinitNow = needsBGSReinit;
         needsBGSReinit = false;
-        if (cameraSettling) {
-            bgsLearningRate = 0.5;  // учим новый фон пока камера трясётся
-        }
-        // postSettle LR=0.3 убран: за 500ms он поглощал объект в фон (0.7^10≈0.03)
-        // → MOG2 включал объект в фон → 2с на восстановление при LR=0.01.
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;
@@ -1173,9 +1170,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
                 if (moveAmount > 0.8) {
-                    auto t = std::chrono::steady_clock::now();
-                    settleUntil     = t + std::chrono::milliseconds(200);
-                    postSettleUntil = t + std::chrono::milliseconds(500);
+                    servoSettleFrames = 9;  // 9 кадров ~200ms при 45fps
                     if (moveAmount > 3.0) {
                         needsBGSReinit = true;  // полный reinit только при большом прыжке
                     }

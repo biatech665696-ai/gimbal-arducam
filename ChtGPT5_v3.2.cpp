@@ -338,7 +338,7 @@ public:
 
 /* =============== SUBPIXEL CENTROID =============== */
 
-Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bool resetCounters = false, bool reinitBGS = false, bool settleActive = false)
+Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bool resetCounters = false, bool reinitBGS = false)
 {
     // === BACKGROUND SUBTRACTION MOG2 (ADAPTIVE BACKGROUND MODEL) ===
     static cv::Ptr<cv::BackgroundSubtractorMOG2> bgSubtractor =
@@ -368,12 +368,6 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
         consecutiveMisses = 0;
         lastValidCenter = cv::Point2f(-1, -1);
         boxHistory.clear();
-    }
-    // Во время settle сбрасываем только consecutiveDetections (не lastValidCenter),
-    // чтобы счётчик не набирался от частичных детекций при LR=0.7 и серво
-    // не прыгало раньше MIN_DETECTIONS после завершения settle.
-    if (settleActive) {
-        consecutiveDetections = 0;
     }
     
     Detection d;
@@ -1062,7 +1056,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // пока серво движется → 2с задержки. Пространственный гейт (150px) и
         // MIN_DETECTIONS сами отсекают шум без сброса счётчика.
         bool doReinitBGS = doReinitNow;
-        Detection d = centroid(gray, 0, 0, bgsLearningRate, false, doReinitBGS, cameraSettling);
+        Detection d = centroid(gray, 0, 0, bgsLearningRate, false, doReinitBGS);
         
         if (cameraSettling) {
             d.valid = false;

@@ -1013,12 +1013,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Таймеры реального времени (не зависят от FPS)
         auto now = std::chrono::steady_clock::now();
         bool cameraSettling   = (now < settleUntil);
+        bool postSettleActive = (!cameraSettling && now < postSettleUntil);
         bool doReinitNow = needsBGSReinit;
         needsBGSReinit = false;
         if (cameraSettling) {
-            bgsLearningRate = 0.0;  // заморозка: объект не поглощается пока камера трясётся
+            bgsLearningRate = 0.5;
+        } else if (postSettleActive) {
+            bgsLearningRate = 0.3;
         }
-        // postSettle LR=0.3 удалён: за 500ms × LR=0.3 MOG2 поглощал объект → недолёты
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;

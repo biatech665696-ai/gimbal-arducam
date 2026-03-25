@@ -1019,7 +1019,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (cameraSettling) {
             bgsLearningRate = 0.5;
         } else if (postSettleActive) {
-            bgsLearningRate = 0.3;
+            bgsLearningRate = 0.2;
         }
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {

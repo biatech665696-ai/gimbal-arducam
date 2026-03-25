@@ -1013,14 +1013,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Таймеры реального времени (не зависят от FPS)
         auto now = std::chrono::steady_clock::now();
         bool cameraSettling   = (now < settleUntil);
-        bool postSettleActive = (!cameraSettling && now < postSettleUntil);
         bool doReinitNow = needsBGSReinit;
         needsBGSReinit = false;
         if (cameraSettling) {
-            bgsLearningRate = 0.5;
-        } else if (postSettleActive) {
-            bgsLearningRate = 0.3;
+            bgsLearningRate = 0.5;  // учим новый фон пока камера трясётся
         }
+        // postSettle LR=0.3 убран: за 500ms он поглощал объект в фон (0.7^10≈0.03)
+        // → MOG2 включал объект в фон → 2с на восстановление при LR=0.01.
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;

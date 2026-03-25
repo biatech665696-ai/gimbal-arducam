@@ -1028,11 +1028,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         bool doReinitNow = needsBGSReinit;
         needsBGSReinit = false;
         if (cameraSettling) {
-            bgsLearningRate = 0.5;
+            bgsLearningRate = 0.0;  // заморозка: не обновлять фон пока камера трясётся
+            // LR=0.5 во время settle поглощало объект в фон за ~200мс (9 кадров × 0.5).
+            // LR=0.0 = BGS заморожен → объект не поглощается → детекция сразу после settle.
+            // Примечание: reinitBGS внутри centroid() использует warmup LR=0.5 независимо —
+            // это правильно (быстрое построение нового фона после большого прыжка),
+            // warmup длится 80мс (укладывается внутрь settle=200мс).
         }
-        // postSettle LR=0.3 удалён: при LR=0.3 за ~150мс (7 кадров × 0.3)
-        // MOG2 поглощал объект как фон сразу после каждого шага серво.
-        // Это и было причиной пауз 3-7с в TRACKING — каждый шаг → слепота.
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;

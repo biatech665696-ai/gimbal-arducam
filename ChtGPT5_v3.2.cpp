@@ -693,14 +693,13 @@ public:
         }
         else
         {
-            // When no valid detection, dampen the filter response
-            // Slowly decay velocities to prevent oscillation
+            // When no valid detection, keep last known position (no decay).
+            // Decay x[0]*=0.98 pulled the estimated angle toward 0 (center)
+            // during every settle/blind period, making the servo aim at a
+            // position 50%+ closer to center than the real object → undershoot.
+            // Velocities still decay to avoid runaway prediction.
             x[2] = x[2] * 0.95;  // Decay velocity estimates
             x[3] = x[3] * 0.95;
-            
-            // Slowly move back to center
-            x[0] = x[0] * 0.98;  // Decay theta toward 0
-            x[1] = x[1] * 0.98;  // Decay phi toward 0
             
             // Increase uncertainty when no measurement
             P[0] += 0.01;

@@ -986,9 +986,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     // Пока > 0: подавляем детекцию + быстрое переобучение фона
     int servoSettleFrames = 0;
     bool needsBGSReinit = false;
-    // Таймеры settle/postSettle в реальном времени (не зависят от FPS)
-    auto settleUntil      = std::chrono::steady_clock::now();
-    auto postSettleUntil  = std::chrono::steady_clock::now();
 
     while(run)
     {
@@ -1010,17 +1007,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // learningRate for BGS: 1.0 on mode change (instant reset), 0.05 for
         // first 60 frames (fast warm-up at new static position), 0.01 normal
         double bgsLearningRate = 0.01;
-        // Таймеры реального времени (не зависят от FPS)
-        auto now = std::chrono::steady_clock::now();
-        bool cameraSettling   = (now < settleUntil);
-        bool postSettleActive = (!cameraSettling && now < postSettleUntil);
         bool doReinitNow = needsBGSReinit;
         needsBGSReinit = false;
-        if (cameraSettling) {
-            bgsLearningRate = 0.5;
-        } else if (postSettleActive) {
-            bgsLearningRate = 0.3;
-        }
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;
@@ -1056,17 +1044,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::Mat gray;
         cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
 
-        // Detect motion on downscaled frame.
-        // Во время стабилизации сбрасываем внутренние счётчики centroid(),
-        // чтобы накопленные за settle-период фоновые срабатывания не прорвались
-        // сразу после окончания паузы (петля обратной связи).
-        bool doReinitBGS = doReinitNow;  // сброс MOG2 в первый кадр после движения серво
-        Detection d = centroid(gray, 0, 0, bgsLearningRate, cameraSettling, doReinitBGS);
-        
-        if (cameraSettling) {
-            d.valid = false;
-            d.all_boxes.clear();
-        }
+        bool doReinitBGS = doReinitNow;  // сброс MOG2 при большом прыжке серво
+        Detection d = centroid(gray, 0, 0, bgsLearningRate, false, doReinitBGS);
         
         // Scale detection coordinates back to original resolution (0.25x -> 1x = *4)
         if (d.valid) {
@@ -1166,20 +1145,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             
             // Move servos only in TRACKING mode
             if (currentTrackingEnabled) {
-                // Два порога:
-                // > 0.8°: settle 200ms (подавляет детекцию пока камера дрожит).
-                //          БЕЗ reinit: postSettle LR=0.3 быстро адаптирует MOG2
-                //          к небольшому сдвигу без warmup-слепоты.
-                // > 3.0°: settle + полный reinit (фон меняется кардинально).
+                // Settle убран: он блокировал серво на 200ms после каждого шага,
+                // создавая постоянный фиксированный разрыв = V × 200ms.
+                // Reinit при большом прыжке (>5°) оставлен — фон меняется кардинально.
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
-                if (moveAmount > 0.8) {
-                    auto t = std::chrono::steady_clock::now();
-                    settleUntil     = t + std::chrono::milliseconds(200);
-                    postSettleUntil = t + std::chrono::milliseconds(500);
-                    if (moveAmount > 3.0) {
-                        needsBGSReinit = true;  // полный reinit только при большом прыжке
-                    }
+                if (moveAmount > 5.0) {
+                    needsBGSReinit = true;
                 }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));

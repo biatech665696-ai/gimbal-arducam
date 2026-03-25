@@ -360,7 +360,7 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
     static int consecutiveDetections = 0;
     static int consecutiveMisses = 0;
     static std::deque<std::vector<cv::Rect>> boxHistory;  // 9-frame sliding window
-    const int MIN_DETECTIONS = 3;  // 3 кадра подряд — баланс скорости и шумоподавления
+    const int MIN_DETECTIONS = 1;  // 1 кадр: было 3 → каждый settle требовал 3 кадра (~150мс) переподтверждения
     const int MAX_MISSES = 60;
 
     // Сброс счётчиков при стабилизации сервопривода.

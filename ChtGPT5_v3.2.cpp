@@ -1213,6 +1213,26 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             cv::circle(display, trajHistory[i], 4, col, -1);
         }
 
+        // === TRAJECTORY цента кадра (куда серво целится) — cyan ===
+        static std::deque<cv::Point2f> aimHistory;
+        {
+            // Центр кадра в пикселях = куда смотрит камера сейчас
+            // После predictFuture s.theta/s.phi показывают остаточную ошибку.
+            // Позиция куда серво нацелилось = центр минус ошибка:
+            double aimX = cx - s.theta * F;
+            double aimY = cy - s.phi   * F;
+            aimHistory.push_back(cv::Point2f((float)aimX, (float)aimY));
+            if (aimHistory.size() > 30) aimHistory.pop_front();
+        }
+        for (int i = 0; i < (int)aimHistory.size(); i++) {
+            float t = (float)i / std::max((int)aimHistory.size() - 1, 1);
+            // зелёный→белый
+            cv::Scalar col(200 * t, 255, 200 * t);
+            if (i > 0)
+                cv::line(display, aimHistory[i-1], aimHistory[i], col, 2);
+            cv::circle(display, aimHistory[i], 4, col, -1);
+        }
+
         // Рисуем куда целится серво (предсказанная позиция после predictFuture)
         // ex, ey уже вычислены выше, рисуем крест в точке предсказания
         if (d.valid) {

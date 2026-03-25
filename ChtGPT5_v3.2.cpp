@@ -1130,9 +1130,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ex = s.theta * F;  // >0 объект справа
             double ey = s.phi   * F;  // >0 объект снизу
 
-            // Нормируем на половину кадра → [-1, 1]
+            // Нормируем на cx (960) для ОБЕИХ осей — симметричный отклик.
+            // Раньше cy=540 давал вертикальный шаг в 960/540=1.78x больше
+            // горизонтального → серво описывало эллипс вместо круга.
             double norm_ex = ex / cx;
-            double norm_ey = ey / cy;
+            double norm_ey = ey / cx;  // cx, не cy!
 
             // Шаг прямо пропорционален расстоянию: MAX_STEP_DEG при объекте у края
             const double MAX_STEP_DEG = 15.0;

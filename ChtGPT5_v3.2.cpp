@@ -1019,7 +1019,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (cameraSettling) {
             bgsLearningRate = 0.5;
         } else if (postSettleActive) {
-            bgsLearningRate = 0.1;
+            bgsLearningRate = 0.3;
         }
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
@@ -1175,8 +1175,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
                 if (moveAmount > 0.8) {
                     auto t = std::chrono::steady_clock::now();
-                    settleUntil     = t + std::chrono::milliseconds(0);
-                    postSettleUntil = t + std::chrono::milliseconds(600);
+                    settleUntil     = t + std::chrono::milliseconds(200);
+                    postSettleUntil = t + std::chrono::milliseconds(500);
                     if (moveAmount > 3.0) {
                         needsBGSReinit = true;  // полный reinit только при большом прыжке
                     }

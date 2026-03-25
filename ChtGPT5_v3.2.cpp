@@ -1199,12 +1199,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Используем NaN-разделитель для разрыва линии при потере объекта
         static std::deque<cv::Point2f> trajHistory;
         static std::deque<cv::Point2f> servoHistory;  // куда прыгало серво
+        static bool prevDetValid = false;
         if (d.valid) {
             trajHistory.push_back(cv::Point2f(d.x, d.y));
-        } else {
-            // Разрыв: добавляем «невалидную» точку чтобы не соединять куски
+        } else if (prevDetValid) {
+            // Разрыв только при переходе valid→invalid (не каждый кадр settle)
             trajHistory.push_back(cv::Point2f(-1, -1));
         }
+        prevDetValid = d.valid;
         if (trajHistory.size() > 60) trajHistory.pop_front();
 
         // Рисуем траекторию объекта: линии от точки к точке, цвет от синего к красному

@@ -1169,7 +1169,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
                 if (moveAmount > 0.8) {
-                    servoSettleFrames = 8;  // 8 кадров ~178ms при 45fps
+                    servoSettleFrames = 9;  // 9 кадров ~200ms при 45fps
                     if (moveAmount > 3.0) {
                         needsBGSReinit = true;  // полный reinit только при большом прыжке
                     }

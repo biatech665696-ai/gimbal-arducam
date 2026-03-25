@@ -1056,12 +1056,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::Mat gray;
         cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
 
-        // Detect motion on downscaled frame.
-        // Во время стабилизации сбрасываем внутренние счётчики centroid(),
-        // чтобы накопленные за settle-период фоновые срабатывания не прорвались
-        // сразу после окончания паузы (петля обратной связи).
-        bool doReinitBGS = doReinitNow;  // сброс MOG2 в первый кадр после движения серво
-        Detection d = centroid(gray, 0, 0, bgsLearningRate, cameraSettling, doReinitBGS);
+        // Во время settle NE сбрасываем счётчики consecutiveDetections:
+        // каждый шаг серво сбрасывал счётчик → MIN_DETECTIONS=3 никогда не набирался
+        // пока серво движется → 2с задержки. Пространственный гейт (150px) и
+        // MIN_DETECTIONS сами отсекают шум без сброса счётчика.
+        bool doReinitBGS = doReinitNow;
+        Detection d = centroid(gray, 0, 0, bgsLearningRate, false, doReinitBGS);
         
         if (cameraSettling) {
             d.valid = false;

@@ -294,6 +294,10 @@ struct Detection
     int box_h = 0;
     bool valid = false;
     std::vector<cv::Rect> all_boxes; // bounding boxes for all moving objects
+    // Сырой кандидат (до MIN_DETECTIONS фильтра) — для визуализации траектории
+    bool has_candidate = false;
+    double cand_x = 0;
+    double cand_y = 0;
 };
 
 struct AngleState
@@ -495,6 +499,13 @@ Detection centroid(cv::Mat &roi, int ox, int oy, double learningRate = 0.005, bo
                 lastValidCenter = currentCenter; // ← critical fix
             }
             
+            // Сырой кандидат всегда записываем (для траектории)
+            if (foundCandidate) {
+                d.has_candidate = true;
+                d.cand_x = currentCenter.x;
+                d.cand_y = currentCenter.y;
+            }
+
             // Only validate object after MIN_DETECTIONS consecutive frames
             if (foundCandidate && consecutiveDetections >= MIN_DETECTIONS) {
                 d.x = currentCenter.x;
@@ -1195,31 +1206,33 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === VISUALIZATION ===
 
-        // === TRAJECTORY: история точек детекции (последние 60 кадров) ===
-        // Используем NaN-разделитель для разрыва линии при потере объекта
+        // === TRAJECTORY: история кандидатов детекции (последние 80 кадров) ===
+        // Используем candidate (до MIN_DETECTIONS фильтра) — даёт непрерывную линию.
+        // Очищаем при шаге серво — убираем стale точки из старой позиции камеры.
         static std::deque<cv::Point2f> trajHistory;
-        static std::deque<cv::Point2f> servoHistory;  // куда прыгало серво
-        static bool prevDetValid = false;
-        if (d.valid) {
-            trajHistory.push_back(cv::Point2f(d.x, d.y));
-        } else if (prevDetValid) {
-            // Разрыв только при переходе valid→invalid (не каждый кадр settle)
-            trajHistory.push_back(cv::Point2f(-1, -1));
-        }
-        prevDetValid = d.valid;
-        if (trajHistory.size() > 60) trajHistory.pop_front();
+        static std::deque<cv::Point2f> servoHistory;
 
-        // Рисуем траекторию объекта: линии от точки к точке, цвет от синего к красному
-        // Пропускаем отрезок если любая из двух точек невалидна (-1,-1)
+        // Очистить при шаге серво (позиция камеры изменилась)
+        if (servoSettleFrames == 9) {  // только что выставили settle = первый кадр шага
+            trajHistory.clear();
+        }
+
+        // Масштабируем candidate из 0.25x → 1x
+        if (d.has_candidate && !cameraSettling) {
+            trajHistory.push_back(cv::Point2f(d.cand_x * 4.0f, d.cand_y * 4.0f));
+        } else if (!d.has_candidate && !cameraSettling && !trajHistory.empty()
+                   && trajHistory.back().x >= 0) {
+            trajHistory.push_back(cv::Point2f(-1, -1));  // разрыв при потере
+        }
+        if (trajHistory.size() > 80) trajHistory.pop_front();
+
+        // Рисуем траекторию: линии между соседними валидными точками
         for (int i = 0; i < (int)trajHistory.size(); i++) {
             if (trajHistory[i].x < 0) continue;
             float t = (float)i / std::max((int)trajHistory.size() - 1, 1);
             cv::Scalar col(255 * (1 - t), 0, 255 * t);  // синий→красный
-            // Линия от предыдущей валидной точки
-            if (i > 0 && trajHistory[i-1].x >= 0) {
+            if (i > 0 && trajHistory[i-1].x >= 0)
                 cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
-            }
-            // Круг всегда для каждой валидной точки
             cv::circle(display, trajHistory[i], 3, col, -1);
         }
 

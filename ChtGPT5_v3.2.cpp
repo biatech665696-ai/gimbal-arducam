@@ -683,8 +683,8 @@ public:
 
             // Update velocities based on innovation (simple derivative)
             if (dt > 0) {
-                x[2] = 0.7 * x[2] + 0.3 * (y0 / dt);  // Faster velocity convergence (was 0.9/0.1)
-                x[3] = 0.7 * x[3] + 0.3 * (y1 / dt);
+                x[2] = 0.8 * x[2] + 0.2 * (y0 / dt);  // Faster velocity convergence (was 0.9/0.1)
+                x[3] = 0.8 * x[3] + 0.2 * (y1 / dt);
             }
 
             // Covariance update: P = (I - K * H) * P

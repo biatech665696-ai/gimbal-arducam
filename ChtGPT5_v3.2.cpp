@@ -1199,14 +1199,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === TRAJECTORY: последние 30 валидных детекций ===
         static std::deque<cv::Point2f> trajHistory;
-        static bool prevSettling = false;
-        if (cameraSettling && !prevSettling)
-            trajHistory.clear();  // шаг серво — старые точки из другой позиции
-        prevSettling = cameraSettling;
 
-        if (d.valid)
+        if (d.valid) {
             trajHistory.push_back(cv::Point2f(d.x, d.y));
-        if (trajHistory.size() > 30) trajHistory.pop_front();
+            if (trajHistory.size() > 30) trajHistory.pop_front();
+        }
 
         for (int i = 0; i < (int)trajHistory.size(); i++) {
             float t = (float)i / std::max((int)trajHistory.size() - 1, 1);

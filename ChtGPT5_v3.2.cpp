@@ -1196,15 +1196,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === VISUALIZATION ===
 
         // === TRAJECTORY: история точек детекции (последние 60 кадров) ===
+        // Используем NaN-разделитель для разрыва линии при потере объекта
         static std::deque<cv::Point2f> trajHistory;
         static std::deque<cv::Point2f> servoHistory;  // куда прыгало серво
         if (d.valid) {
             trajHistory.push_back(cv::Point2f(d.x, d.y));
-            if (trajHistory.size() > 60) trajHistory.pop_front();
+        } else {
+            // Разрыв: добавляем «невалидную» точку чтобы не соединять куски
+            trajHistory.push_back(cv::Point2f(-1, -1));
         }
+        if (trajHistory.size() > 60) trajHistory.pop_front();
 
         // Рисуем траекторию объекта: линии от точки к точке, цвет от синего к красному
+        // Пропускаем отрезок если любая из двух точек невалидна (-1,-1)
         for (int i = 1; i < (int)trajHistory.size(); i++) {
+            if (trajHistory[i-1].x < 0 || trajHistory[i].x < 0) continue;
             float t = (float)i / trajHistory.size();
             cv::Scalar col(255 * (1 - t), 0, 255 * t);  // синий→красный
             cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);

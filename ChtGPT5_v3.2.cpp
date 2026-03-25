@@ -1197,19 +1197,37 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === VISUALIZATION ===
 
-        // === TRAJECTORY: история точек детекции (последние 60 кадров) ===
+        // === TRAJECTORY: история точек детекции ===
         static std::deque<cv::Point2f> trajHistory;
-        static std::deque<cv::Point2f> servoHistory;  // куда прыгало серво
-        if (d.valid) {
-            trajHistory.push_back(cv::Point2f(d.x, d.y));
+        static std::deque<cv::Point2f> servoHistory;
+        static bool prevSettling = false;
+
+        // Очищаем историю в первый кадр settle (шаг серво изменил позицию камеры)
+        if (cameraSettling && !prevSettling) {
+            trajHistory.clear();
+        }
+        prevSettling = cameraSettling;
+
+        // Добавляем точки только вне settle: all_boxes даёт непрерывный сигнал
+        if (!cameraSettling) {
+            if (!d.all_boxes.empty()) {
+                cv::Rect biggest = *std::max_element(d.all_boxes.begin(), d.all_boxes.end(),
+                    [](const cv::Rect& a, const cv::Rect& b){ return a.area() < b.area(); });
+                trajHistory.push_back(cv::Point2f(biggest.x + biggest.width / 2.0f,
+                                                  biggest.y + biggest.height / 2.0f));
+            } else if (!trajHistory.empty() && trajHistory.back().x >= 0) {
+                trajHistory.push_back(cv::Point2f(-1, -1));  // разрыв при потере
+            }
             if (trajHistory.size() > 60) trajHistory.pop_front();
         }
 
-        // Рисуем траекторию объекта: линии от точки к точке, цвет от синего к красному
-        for (int i = 1; i < (int)trajHistory.size(); i++) {
-            float t = (float)i / trajHistory.size();
-            cv::Scalar col(255 * (1 - t), 0, 255 * t);  // синий→красный
-            cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
+        // Рисуем траекторию: синий→красный
+        for (int i = 0; i < (int)trajHistory.size(); i++) {
+            if (trajHistory[i].x < 0) continue;
+            float t = (float)i / std::max((int)trajHistory.size() - 1, 1);
+            cv::Scalar col(255 * (1 - t), 0, 255 * t);
+            if (i > 0 && trajHistory[i-1].x >= 0)
+                cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
             cv::circle(display, trajHistory[i], 3, col, -1);
         }
 

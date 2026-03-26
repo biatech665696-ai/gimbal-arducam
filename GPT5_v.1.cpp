@@ -430,7 +430,7 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
-        const int MIN_DETECTIONS = 1;
+        const int MIN_DETECTIONS = 2;
         const int MAX_MISSES = 60;
 
         Detection d;
@@ -1017,23 +1017,32 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
-        const double DEG_PER_PX = 72.0 / 1920.0 * 1.12;  // ~0.042 deg/px (1.12x overcorrect)
+        const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;  // ~0.03938 deg/px (1.05x overcorrect)
 
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;
             double ey = d.y - cy;
 
             // Lead correction: predict where object will be after detection delay
-            if (velHistory.size() >= 2) {
-                auto& [t0, x0, y0] = velHistory[velHistory.size() - 2];
+            // Require 3+ points for reliable velocity (2 points too noisy)
+            if (velHistory.size() >= 3) {
+                auto& [t0, x0, y0] = velHistory.front();
                 auto& [t1, x1, y1] = velHistory.back();
                 double dt = t1 - t0;
-                if (dt > 0.03 && dt < 1.0) {
+                if (dt > 0.05 && dt < 2.0) {
                     double vx = (x1 - x0) / dt;
                     double vy = (y1 - y0) / dt;
-                    const double LEAD_TIME = 0.15; // predict 150ms ahead
-                    ex += vx * LEAD_TIME;
-                    ey += vy * LEAD_TIME;
+                    const double LEAD_TIME = 0.08; // predict 80ms ahead
+                    double leadX = vx * LEAD_TIME;
+                    double leadY = vy * LEAD_TIME;
+                    // Clamp lead to ±40px: prevent wild jumps from noisy velocity
+                    const double MAX_LEAD = 40.0;
+                    if (leadX > MAX_LEAD) leadX = MAX_LEAD;
+                    if (leadX < -MAX_LEAD) leadX = -MAX_LEAD;
+                    if (leadY > MAX_LEAD) leadY = MAX_LEAD;
+                    if (leadY < -MAX_LEAD) leadY = -MAX_LEAD;
+                    ex += leadX;
+                    ey += leadY;
                 }
             }
 

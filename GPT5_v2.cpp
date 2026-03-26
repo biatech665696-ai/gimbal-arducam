@@ -1467,7 +1467,7 @@ int main()
                 // Update HTTP MJPEG stream frame
                 if (streamRunning) {
                     std::lock_guard<std::mutex> lock(streamMutex);
-                    cv::resize(frame, streamFrame, cv::Size(960, 540));
+                    cv::resize(frame, streamFrame, cv::Size(1600, 900));
                 }
             }
         }

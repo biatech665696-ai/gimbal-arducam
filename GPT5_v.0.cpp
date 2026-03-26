@@ -161,7 +161,7 @@ constexpr bool kVerboseTrackingLogs = false;
 constexpr bool kVerboseFrameLoopLogs = false;
 
 // Predictive control parameters (integrated from ChatGPT5 algorithm)
-constexpr double SYSTEM_DELAY = 0.20;   // Реальная задержка: servoSettleFrames/FPS = 9/45 ≈ 200ms
+constexpr double SYSTEM_DELAY = 0.05;   // Реальная задержка: ~50ms при 20fps (1 кадр capture + 1 кадр processing)
 constexpr bool USE_PREDICTIVE_CONTROL = true;  // Включить предиктивное управление
 
 // Camera parameters (Arducam 64MP @ 1920x1080)
@@ -522,7 +522,7 @@ public:
 
         // Temporal persistence filter (CONFIRM_FRAMES кадров)
         {
-            const int CONFIRM_FRAMES = 2;
+            const int CONFIRM_FRAMES = 1;  // =1 отключает temporal persistence; MIN_DETECTIONS=2 уже фильтрует шум
             boxHistory_.push_back(d.all_boxes);
             if ((int)boxHistory_.size() > CONFIRM_FRAMES)
                 boxHistory_.pop_front();
@@ -655,11 +655,14 @@ public:
         if (dt < 0.001) dt = 0.001;  // Prevent division by zero
 
         // Prediction step (F * x)
-        // x = F * x where F is the state transition matrix
-        // New position = old position + velocity * dt
+        // Лимит на prediction drift: при dt > 0.15s (3+ кадров без измерения)
+        // velocity уже ненадёжна → обнуляем чтобы не уводить позицию.
+        if (dt > 0.15) {
+            x[2] = 0;
+            x[3] = 0;
+        }
         x[0] = x[0] + x[2] * dt;  // theta_new = theta_old + wtheta * dt
         x[1] = x[1] + x[3] * dt;  // phi_new = phi_old + wphi * dt
-        // velocities stay the same (x[2] and x[3])
 
         // Prediction covariance: P = F * P * F^T + Q (simplified)
         // Just increase uncertainty with time
@@ -926,7 +929,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Нет postSettle с LR=0.3 — объект не поглощается в фон.
         bool cameraSettling = (servoSettleFrames > 0);
         if (cameraSettling) {
-            bgsLearningRate = 0.7;
+            // LR=0: НЕ обновлять BGS во время дрожания камеры.
+            // Старый LR=0.7 поглощал объект в фон → 2с слепота после settle.
+            // Сдвиг камеры на 2-5° = 5-10px при 0.25x → MOG2 справится сам.
+            bgsLearningRate = 0;
             servoSettleFrames--;
         }
         bool doReinitNow = needsBGSReinit;

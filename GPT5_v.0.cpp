@@ -414,7 +414,7 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double learningRate = 0.005)
     {
-        const int MIN_DETECTIONS = 3;
+        const int MIN_DETECTIONS = 1;
         const int MAX_MISSES = 60;
 
         Detection d;
@@ -1048,7 +1048,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Settle: 3 кадра (~150ms) для адаптации BGS к сдвигу
             servoSettleFrames = 3;
-            detector.resetConsecutive();
         }
 
         // ROI для визуализации

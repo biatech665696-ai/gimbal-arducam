@@ -972,10 +972,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === ПРЯМОЕ НАВЕДЕНИЕ ===
         // Объект на ex пикселей от центра = ex * (FOV/width) градусов от серво
-        // Серво перемещается ровно на угловое смещение объекта (100% коррекция)
+        // Коэффициент 1.5x компенсирует задержку камера→детект→серво (~50-100мс)
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
-        const double DEG_PER_PX = 72.0 / 1920.0;  // ~0.0375 deg/px (Arducam 64MP ~72° HFOV)
+        const double DEG_PER_PX = 72.0 / 1920.0 * 1.5;  // ~0.05625 deg/px (1.5x overcorrect)
 
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;

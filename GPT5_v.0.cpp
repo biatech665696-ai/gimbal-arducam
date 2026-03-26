@@ -918,17 +918,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double lastSentYawDeg = 90.0;
     double lastSentPitchDeg = 90.0;
 
-    // === ДВУХФАЗНАЯ АРХИТЕКТУРА ===
-    // SEARCH: камера неподвижна, MOG2 ищет объект (работает идеально)
-    // TRACK: template matching следит за объектом, серво каждый кадр (20fps)
-    // Settle не нужен — template matching не зависит от фоновой модели.
-    enum TrackPhase { PHASE_SEARCH, PHASE_TRACK };
-    TrackPhase phase = PHASE_SEARCH;
-    cv::Mat trackTemplate;              // Шаблон для template matching
-    cv::Point2f trackPosSmall(-1, -1);  // Позиция в 0.25x координатах
-    int trackLostCount = 0;             // Кадров без match подряд
-    int templateAge = 0;                // Кадров с захвата шаблона
-    int searchWarmup = 0;               // Кадров BGS warmup
+    // === MOG2 + DEAD ZONE ===
+    // MOG2 детектирует каждый кадр. Серво двигается только если объект
+    // за пределами мёртвой зоны (>DEAD_ZONE_PX от центра кадра).
+    // Объект в центре → серво стоит → MOG2 работает непрерывно на 19fps.
+    // При отклонении → шаг серво → settle (3 кадра ~150ms) → MOG2 адаптирует фон.
+    const double DEAD_ZONE_PX = 60.0;  // full-res пикс., ~3% от 1920
+    int servoSettleFrames = 0;
+    int bgsWarmupFrames = 0;
 
     // Для визуализации
     cv::Rect lastROI;
@@ -968,13 +965,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
             lastYawDeg   = 90.0;
             lastPitchDeg = 90.0;
-            phase = PHASE_SEARCH;
         }
 
-        // При переключении FIXED → TRACKING: начинаем с SEARCH
+        // При переключении FIXED → TRACKING: reinit BGS
         if (modeJustChanged && currentTrackingEnabled) {
-            phase = PHASE_SEARCH;
-            searchWarmup = 0;
+            bgsWarmupFrames = 0;
+            servoSettleFrames = 0;
             detector.reinitBGS();
         }
 
@@ -985,148 +981,76 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::Mat gray;
         cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
 
-        Detection d;
-        d.valid = false;
+        // === BGS LEARNING RATE ===
+        bool cameraSettling = (servoSettleFrames > 0);
+        if (!currentTrackingEnabled) {
+            // FIXED mode: LR already set by framesSinceFixedMode above
+        } else if (cameraSettling) {
+            bgsLearningRate = 0.35;  // быстро учим новый фон после сдвига
+            servoSettleFrames--;
+        } else if (bgsWarmupFrames == 0) {
+            bgsLearningRate = 1.0;   // мгновенный сброс при старте
+        } else if (bgsWarmupFrames <= 20) {
+            bgsLearningRate = 0.1;   // warmup
+        }
+        // после warmup: 0.01 (нормальный)
+        if (currentTrackingEnabled) bgsWarmupFrames++;
+
+        // === DETECTION (каждый кадр, и FIXED и TRACKING) ===
+        Detection d = detector.detect(gray, 0, 0, bgsLearningRate);
+
+        // FG pixel gate: слишком много foreground = камера сдвинулась.
+        // Нормальная детекция: fg=10-100px. Сдвиг камеры: fg=3000-35000px.
+        if (detector.lastFGPixels() > 2000) {
+            d.valid = false;
+            d.all_boxes.clear();
+        }
+
+        // Noise gate: >5 объектов = шум от сдвига камеры
+        if ((int)d.all_boxes.size() > 5) {
+            d.valid = false;
+            d.all_boxes.clear();
+        }
+
+        // Settle suppression: после движения серво MOG2 видит сдвиг
+        if (cameraSettling && currentTrackingEnabled) {
+            d.valid = false;
+            d.all_boxes.clear();
+        }
+
+        // Scale → full-res
+        if (d.valid) {
+            d.x *= 4; d.y *= 4;
+            d.box_x *= 4; d.box_y *= 4; d.box_w *= 4; d.box_h *= 4;
+        }
+        for (auto& box : d.all_boxes) {
+            box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4;
+        }
+
+        // === P-КОНТРОЛЛЕР + DEAD ZONE ===
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
 
-        // ============================================================
-        // ФАЗА 1: FIXED — только детекция для визуализации
-        // ============================================================
-        if (!currentTrackingEnabled) {
-            d = detector.detect(gray, 0, 0, bgsLearningRate);
-            if ((int)d.all_boxes.size() > 10) { d.valid = false; d.all_boxes.clear(); }
-            if (d.valid) { d.x *= 4; d.y *= 4; d.box_x *= 4; d.box_y *= 4; d.box_w *= 4; d.box_h *= 4; }
-            for (auto& box : d.all_boxes) { box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4; }
-        }
-        // ============================================================
-        // ФАЗА 2: SEARCH — камера стоит, MOG2 ищет объект
-        // ============================================================
-        else if (phase == PHASE_SEARCH) {
-            // BGS warmup: LR=1.0 (мгновенный сброс) → 0.1 (warmup) → 0.01
-            if (searchWarmup == 0)       bgsLearningRate = 1.0;
-            else if (searchWarmup <= 20) bgsLearningRate = 0.1;
-            else                         bgsLearningRate = 0.01;
-            searchWarmup++;
+        if (d.valid && currentTrackingEnabled) {
+            double ex = d.x - cx;
+            double ey = d.y - cy;
 
-            d = detector.detect(gray, 0, 0, bgsLearningRate);
-
-            // Noise gate
-            if ((int)d.all_boxes.size() > 10) { d.valid = false; d.all_boxes.clear(); }
-
-            // При валидной детекции: захват шаблона → TRACK
-            if (d.valid) {
-                // Шаблон = bbox + padding (для контекста вокруг объекта)
-                int pad = std::max(d.box_w, d.box_h) * 2;
-                pad = std::max(pad, 15);  // минимум 15px отступа
-                int tx = d.box_x - pad, ty = d.box_y - pad;
-                int tw = d.box_w + 2*pad, th = d.box_h + 2*pad;
-                tx = std::max(0, tx); ty = std::max(0, ty);
-                if (tx + tw > gray.cols) tw = gray.cols - tx;
-                if (ty + th > gray.rows) th = gray.rows - ty;
-
-                if (tw >= 10 && th >= 10) {
-                    trackTemplate = gray(cv::Rect(tx, ty, tw, th)).clone();
-                    trackPosSmall = cv::Point2f(d.x, d.y);
-                    trackLostCount = 0;
-                    templateAge = 0;
-                    phase = PHASE_TRACK;
-                }
-            }
-
-            // Масштаб → full-res для визуализации
-            if (d.valid) { d.x *= 4; d.y *= 4; d.box_x *= 4; d.box_y *= 4; d.box_w *= 4; d.box_h *= 4; }
-            for (auto& box : d.all_boxes) { box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4; }
-
-            // В SEARCH серво НЕ двигается → MOG2 работает корректно
-        }
-        // ============================================================
-        // ФАЗА 3: TRACK — template matching каждый кадр, серво следит
-        // ============================================================
-        else { // PHASE_TRACK
-            // Фоновую модель продолжаем обновлять (LR=0.05) чтобы при
-            // возврате в SEARCH она была актуальна.
-            detector.detect(gray, 0, 0, 0.05);
-
-            // Template matching в области поиска вокруг последней позиции
-            const int SEARCH_PAD = 50;  // пикселей в 0.25x
-            int sx = (int)trackPosSmall.x - trackTemplate.cols/2 - SEARCH_PAD;
-            int sy = (int)trackPosSmall.y - trackTemplate.rows/2 - SEARCH_PAD;
-            int sw = trackTemplate.cols + 2*SEARCH_PAD;
-            int sh = trackTemplate.rows + 2*SEARCH_PAD;
-            sx = std::max(0, sx); sy = std::max(0, sy);
-            if (sx + sw > gray.cols) sw = gray.cols - sx;
-            if (sy + sh > gray.rows) sh = gray.rows - sy;
-
-            bool matchGood = false;
-            double matchScore = 0;
-            if (sw > trackTemplate.cols && sh > trackTemplate.rows) {
-                cv::Mat searchRoi = gray(cv::Rect(sx, sy, sw, sh));
-                cv::Mat result;
-                cv::matchTemplate(searchRoi, trackTemplate, result, cv::TM_CCOEFF_NORMED);
-                double maxVal;
-                cv::Point maxLoc;
-                cv::minMaxLoc(result, nullptr, &maxVal, nullptr, &maxLoc);
-                matchScore = maxVal;
-
-                if (maxVal >= 0.35) {
-                    matchGood = true;
-                    trackPosSmall.x = sx + maxLoc.x + trackTemplate.cols / 2.0f;
-                    trackPosSmall.y = sy + maxLoc.y + trackTemplate.rows / 2.0f;
-                    trackLostCount = 0;
-                    templateAge++;
-
-                    // Формируем Detection для визуализации и P-контроллера
-                    d.x = trackPosSmall.x * 4.0;
-                    d.y = trackPosSmall.y * 4.0;
-                    d.box_x = (sx + maxLoc.x) * 4;
-                    d.box_y = (sy + maxLoc.y) * 4;
-                    d.box_w = trackTemplate.cols * 4;
-                    d.box_h = trackTemplate.rows * 4;
-                    d.valid = true;
-                    d.all_boxes.push_back(cv::Rect(d.box_x, d.box_y, d.box_w, d.box_h));
-
-                    // Обновляем шаблон каждые 30 кадров
-                    if (templateAge >= 30) {
-                        int ntx = (int)trackPosSmall.x - trackTemplate.cols/2;
-                        int nty = (int)trackPosSmall.y - trackTemplate.rows/2;
-                        ntx = std::max(0, ntx); nty = std::max(0, nty);
-                        int ntw = trackTemplate.cols, nth = trackTemplate.rows;
-                        if (ntx + ntw > gray.cols) ntw = gray.cols - ntx;
-                        if (nty + nth > gray.rows) nth = gray.rows - nty;
-                        if (ntw >= 10 && nth >= 10) {
-                            trackTemplate = gray(cv::Rect(ntx, nty, ntw, nth)).clone();
-                            templateAge = 0;
-                        }
-                    }
-                }
-            }
-
-            if (!matchGood) {
-                trackLostCount++;
-                if (trackLostCount > 15) {
-                    // Потеряли объект → обратно в SEARCH
-                    phase = PHASE_SEARCH;
-                    searchWarmup = 0;
-                    detector.reinitBGS();
-                }
-            }
-
-            // === P-КОНТРОЛЛЕР: серво следует КАЖДЫЙ КАДР (нет settle!) ===
-            if (d.valid) {
-                double ex = d.x - cx;
-                double ey = d.y - cy;
+            // Dead zone: не двигаем серво если объект близко к центру.
+            // Пока объект внутри ±60px → серво стоит → MOG2 работает
+            // непрерывно без settle-перерывов. Только при выходе за
+            // мёртвую зону → коррекция → короткий settle.
+            if (std::abs(ex) > DEAD_ZONE_PX || std::abs(ey) > DEAD_ZONE_PX) {
                 double norm_ex = ex / cx;
                 double norm_ey = ey / cx;
-                const double MAX_STEP_DEG = 8.0;
+                const double MAX_STEP_DEG = 10.0;
                 double stepYaw   = norm_ex * MAX_STEP_DEG;
                 double stepPitch = norm_ey * MAX_STEP_DEG;
                 yawDeg   = lastYawDeg   - stepYaw;
                 pitchDeg = lastPitchDeg - stepPitch;
 
-                if (yawDeg < 5.0)   yawDeg = 5.0;
+                if (yawDeg < 5.0) yawDeg = 5.0;
                 if (yawDeg > 175.0) yawDeg = 175.0;
-                if (pitchDeg < 5.0)   pitchDeg = 5.0;
+                if (pitchDeg < 5.0) pitchDeg = 5.0;
                 if (pitchDeg > 175.0) pitchDeg = 175.0;
 
                 lastYawDeg = yawDeg;
@@ -1135,6 +1059,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
                 lastSentYawDeg = yawDeg;
                 lastSentPitchDeg = pitchDeg;
+
+                // Settle: 5 кадров (~250ms) для адаптации BGS к сдвигу
+                servoSettleFrames = 5;
+                detector.resetConsecutive();
             }
         }
 
@@ -1152,21 +1080,22 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double elapsed = std::chrono::duration<double>(fpsNow - fpsTimer).count();
             double fps = 30.0 / elapsed;
             fpsTimer = fpsNow;
-            const char* phaseStr = (phase == PHASE_SEARCH) ? "SEARCH" : "TRACK";
             std::cout << "\n=== TRACKING STATUS ===" << std::endl;
             std::cout << "FPS: " << std::fixed << std::setprecision(1) << fps << std::endl;
-            std::cout << "Mode: " << (currentTrackingEnabled ? "TRACKING" : "FIXED")
-                      << " Phase: " << phaseStr << std::endl;
+            std::cout << "Mode: " << (currentTrackingEnabled ? "TRACKING" : "FIXED") << std::endl;
             std::cout << "Objects: " << d.all_boxes.size()
                       << " Valid: " << (d.valid ? "YES" : "NO") << std::endl;
-            if (d.valid)
-                std::cout << "Target: (" << (int)d.x << ", " << (int)d.y << ")" << std::endl;
-            std::cout << "Servo: Yaw=" << lastYawDeg << "° Pitch=" << lastPitchDeg << "°" << std::endl;
-            if (phase == PHASE_SEARCH)
-                std::cout << "BGS: fg=" << detector.lastFGPixels() << "px warmup=" << searchWarmup << std::endl;
-            else
-                std::cout << "Template: " << trackTemplate.cols << "x" << trackTemplate.rows
-                          << " age=" << templateAge << " lost=" << trackLostCount << std::endl;
+            if (d.valid) {
+                double dbg_ex = d.x - cx, dbg_ey = d.y - cy;
+                std::cout << "Target: (" << (int)d.x << ", " << (int)d.y
+                          << ") err=(" << (int)dbg_ex << "," << (int)dbg_ey << "px)"
+                          << (std::abs(dbg_ex) <= DEAD_ZONE_PX && std::abs(dbg_ey) <= DEAD_ZONE_PX ? " [IN ZONE]" : " [SERVO MOVE]")
+                          << std::endl;
+            }
+            std::cout << "Servo: Yaw=" << lastYawDeg << "\u00b0 Pitch=" << lastPitchDeg << "\u00b0" << std::endl;
+            std::cout << "BGS: fg=" << detector.lastFGPixels() << "px contours=" << detector.lastRawContours()
+                      << " LR=" << std::setprecision(2) << bgsLearningRate
+                      << (cameraSettling ? " [SETTLE]" : "") << std::setprecision(1) << std::endl;
             std::cout << "===================\n" << std::endl;
         }
         
@@ -1174,7 +1103,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === VISUALIZATION ===
 
-        // === TRAJECTORY: последние 30 валидных детекций ===
+        // === TRAJECTORY: последние 30 валидных детекций (красный) ===
         static std::deque<cv::Point2f> trajHistory;
 
         if (d.valid) {
@@ -1183,27 +1112,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         for (int i = 0; i < (int)trajHistory.size(); i++) {
-            float t = (float)i / std::max((int)trajHistory.size() - 1, 1);
-            cv::Scalar col(255 * (1 - t), 0, 255 * t);  // синий→красный
+            int alpha = 80 + 175 * i / std::max((int)trajHistory.size() - 1, 1);
+            cv::Scalar col(0, 0, alpha);  // красный (BGR), от тёмного к яркому
             if (i > 0)
                 cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
             cv::circle(display, trajHistory[i], 4, col, -1);
         }
 
-        // === TRAJECTORY цента кадра (куда серво целится) — cyan ===
-        static std::deque<cv::Point2f> aimHistory;
-        if (d.valid) {
-            // Центр кадра в пикселях — куда серво фактически нацелилось
-            aimHistory.push_back(cv::Point2f((float)d.x, (float)d.y));
-            if (aimHistory.size() > 30) aimHistory.pop_front();
-        }
-        for (int i = 0; i < (int)aimHistory.size(); i++) {
-            float t = (float)i / std::max((int)aimHistory.size() - 1, 1);
-            cv::Scalar col(200 * t, 255, 200 * t);
-            if (i > 0)
-                cv::line(display, aimHistory[i-1], aimHistory[i], col, 2);
-            cv::circle(display, aimHistory[i], 4, col, -1);
-        }
+        // === DEAD ZONE — белый круг вокруг центра кадра ===
+        cv::circle(display, cv::Point((int)cx, (int)cy), (int)DEAD_ZONE_PX,
+                   cv::Scalar(255, 255, 255), 1);
 
         // Рисуем куда целится серво (позиция детекции)
         if (d.valid) {

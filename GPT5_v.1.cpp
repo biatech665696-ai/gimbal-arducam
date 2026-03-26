@@ -1017,7 +1017,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
-        const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;  // ~0.03938 deg/px (1.05x overcorrect)
+        const double DEG_PER_PX = 72.0 / 1920.0;  // 0.0375 deg/px (exact FOV, lead handles lag)
 
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;
@@ -1046,8 +1046,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 }
             }
 
-            // Clamp max error: >300px from center = likely false detection
-            const double MAX_ERR = 300.0;
+            // Clamp max error: >200px from center = likely false detection
+            const double MAX_ERR = 200.0;
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 

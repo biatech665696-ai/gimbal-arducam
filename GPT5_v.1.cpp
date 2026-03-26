@@ -373,20 +373,21 @@ public:
     void notifyAll() { cv.notify_all(); }
 };
 
-/* =============== OPTICAL FLOW MOTION DETECTOR =============== */
-// Детекция через frame-to-frame optical flow.
-// 1. Вычисляем dense optical flow (Farneback) между prevGray и curGray
-// 2. Оцениваем глобальное движение камеры (медиана flow)
-// 3. Вычитаем глобальный flow → остаток = независимо движущиеся объекты
-// 4. Порог на магнитуду остатка → маска → контуры → фильтрация
-// Преимущества: НЕ нужен settle, работает КАЖДЫЙ кадр, движение камеры компенсируется.
+/* =============== MOTION-COMPENSATED FRAME DIFFERENCING =============== */
+// Детекция независимо движущихся объектов:
+// 1. Sparse OF (Lucas-Kanade) для оценки глобального движения камеры
+// 2. Affine warp предыдущего кадра для компенсации движения камеры
+// 3. absdiff между выравненным предыдущим и текущим кадром → маска движения
+// 4. Контуры + фильтрация → объект
+// Преимущества: БЫСТРО (sparse OF + absdiff), НЕ нужен settle, работает КАЖДЫЙ кадр.
 
 class MotionDetector
 {
 public:
     MotionDetector()
         : clahe_(cv::createCLAHE(2.0, cv::Size(8, 8)))
-        , kernel_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
+        , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
+        , kernel5_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)))
         , lastValidCenter_(-1, -1)
         , consecutiveDetections_(0)
         , consecutiveMisses_(0)
@@ -399,24 +400,22 @@ public:
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
-    // Совместимость — optical flow не нуждается в reinit
-    void reinitBGS() { prevGray_ = cv::Mat(); }
+    void reinitBGS() { prevGray_ = cv::Mat(); prevPoints_.clear(); }
     void resetCounters()
     {
         consecutiveDetections_ = 0;
         consecutiveMisses_ = 0;
         lastValidCenter_ = cv::Point2f(-1, -1);
         prevGray_ = cv::Mat();
+        prevPoints_.clear();
     }
     void resetConsecutive() { consecutiveDetections_ = 0; }
 
-    // learningRate не используется (совместимость интерфейса)
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
-        const int MIN_DETECTIONS = 2;  // OF более стабилен — 2 кадров достаточно
+        const int MIN_DETECTIONS = 2;
         const int MAX_MISSES = 60;
-        const float FLOW_THRESHOLD = 3.0f;  // min pixels/frame для "движение"
-        const float INDEPENDENT_THRESHOLD = 3.0f;  // отличие от глобального flow (sensor noise ~1-2px)
+        const int DIFF_THRESHOLD = 25;  // абсолютная разница яркости для "изменение"
 
         Detection d;
         d.valid = false;
@@ -438,53 +437,78 @@ public:
             return d;
         }
 
-        // === DENSE OPTICAL FLOW (Farneback) ===
-        cv::Mat flow;
-        cv::calcOpticalFlowFarneback(prevGray_, gray, flow,
-            0.5,   // pyr_scale
-            3,     // levels
-            15,    // winsize
-            3,     // iterations
-            5,     // poly_n
-            1.1,   // poly_sigma
-            0      // flags
-        );
+        // === ШАГОТКОМПЕНСАЦИЯ ДВИЖЕНИЯ КАМЕРЫ ===
+        // 1. Находим хорошие точки в предыдущем кадре
+        std::vector<cv::Point2f> prevPts;
+        cv::goodFeaturesToTrack(prevGray_, prevPts, 200, 0.01, 10);
+
+        cv::Mat fgMask;
+        lastGlobalFlow_ = cv::Point2f(0, 0);
+
+        if (prevPts.size() >= 4) {
+            // 2. Трекаем точки sparse OF (Lucas-Kanade) — БЫСТРО
+            std::vector<cv::Point2f> currPts;
+            std::vector<uchar> status;
+            std::vector<float> err;
+            cv::calcOpticalFlowPyrLK(prevGray_, gray, prevPts, currPts, status, err,
+                cv::Size(21, 21), 3);
+
+            // Отбираем хорошие совпадения
+            std::vector<cv::Point2f> goodPrev, goodCurr;
+            for (size_t i = 0; i < status.size(); i++) {
+                if (status[i] && err[i] < 12.0f) {
+                    goodPrev.push_back(prevPts[i]);
+                    goodCurr.push_back(currPts[i]);
+                }
+            }
+
+            if (goodPrev.size() >= 4) {
+                // 3. Оценка affine трансформации (движение камеры)
+                cv::Mat inlierMask;
+                cv::Mat affine = cv::estimateAffinePartial2D(
+                    goodPrev, goodCurr, inlierMask,
+                    cv::RANSAC, 3.0);
+
+                if (!affine.empty()) {
+                    // Извлекаем глобальный сдвиг для диагностики
+                    lastGlobalFlow_ = cv::Point2f(
+                        (float)affine.at<double>(0, 2),
+                        (float)affine.at<double>(1, 2));
+
+                    // 4. Warp предыдущий кадр к текущему
+                    cv::Mat warped;
+                    cv::warpAffine(prevGray_, warped, affine, gray.size(),
+                        cv::INTER_LINEAR, cv::BORDER_REFLECT);
+
+                    // 5. Абсолютная разница → маска движения
+                    cv::Mat diff;
+                    cv::absdiff(warped, gray, diff);
+                    cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
+                } else {
+                    // Affine не вычислен — просто absdiff без компенсации
+                    cv::Mat diff;
+                    cv::absdiff(prevGray_, gray, diff);
+                    cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
+                }
+            } else {
+                // Мало совпадений — absdiff без компенсации
+                cv::Mat diff;
+                cv::absdiff(prevGray_, gray, diff);
+                cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
+            }
+        } else {
+            // Мало точек — absdiff без компенсации
+            cv::Mat diff;
+            cv::absdiff(prevGray_, gray, diff);
+            cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
+        }
 
         // Сохраняем для следующего кадра
         prevGray_ = gray.clone();
 
-        // === ГЛОБАЛЬНОЕ ДВИЖЕНИЕ КАМЕРЫ (медиана) ===
-        cv::Mat flowChannels[2];
-        cv::split(flow, flowChannels);
-
-        // Медиана по X и Y для оценки глобального сдвига камеры
-        cv::Mat flatX = flowChannels[0].reshape(1, 1);
-        cv::Mat flatY = flowChannels[1].reshape(1, 1);
-        cv::Mat sortedX, sortedY;
-        cv::sort(flatX, sortedX, cv::SORT_ASCENDING);
-        cv::sort(flatY, sortedY, cv::SORT_ASCENDING);
-        int mid = sortedX.cols / 2;
-        float globalFlowX = sortedX.at<float>(0, mid);
-        float globalFlowY = sortedY.at<float>(0, mid);
-        lastGlobalFlow_ = cv::Point2f(globalFlowX, globalFlowY);
-
-        // === ВЫЧИТАЕМ ГЛОБАЛЬНЫЙ FLOW → независимое движение ===
-        cv::Mat residualX = flowChannels[0] - globalFlowX;
-        cv::Mat residualY = flowChannels[1] - globalFlowY;
-
-        // Магнитуда остатка
-        cv::Mat magnitude;
-        cv::magnitude(residualX, residualY, magnitude);
-
-        // Порог: пиксели с достаточной независимой скоростью
-        cv::Mat fgMask;
-        cv::threshold(magnitude, fgMask, INDEPENDENT_THRESHOLD, 255, cv::THRESH_BINARY);
-        fgMask.convertTo(fgMask, CV_8U);
-
-        // Морфология — убрать шум, соединить близкие области
-        cv::Mat kernel5 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel5);  // убить мелкий шум
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel_);  // соединить
+        // Морфология
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel5_);  // убить шум
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);  // соединить
 
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
@@ -502,23 +526,17 @@ public:
             double solidity = (bboxArea > 0) ? (area / bboxArea) : 0;
             double aspectRatio = (double)bbox.width / (double)bbox.height;
 
-            const int EDGE_MARGIN = 3;
+            const int EDGE_MARGIN = 5;
             bool atEdge = (bbox.x <= EDGE_MARGIN || bbox.y <= EDGE_MARGIN ||
                           bbox.x + bbox.width >= roi.cols - EDGE_MARGIN ||
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
-            // Проверяем среднюю магнитуду остаточного flow внутри контура
-            cv::Mat contourMask = cv::Mat::zeros(magnitude.size(), CV_8U);
-            cv::drawContours(contourMask, contours, (int)i, 255, cv::FILLED);
-            double meanMag = cv::mean(magnitude, contourMask)[0];
-
             if (!atEdge &&
-                area >= 5.0 && area <= 2000.0 &&
-                solidity > 0.2 &&
+                area >= 5.0 && area <= 1500.0 &&
+                solidity > 0.25 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
-                bbox.width <= 120 && bbox.height <= 120 &&
-                aspectRatio > 0.1 && aspectRatio < 10.0 &&
-                meanMag > FLOW_THRESHOLD) {
+                bbox.width <= 100 && bbox.height <= 100 &&
+                aspectRatio > 0.12 && aspectRatio < 8.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
                 validObjects.push_back(std::make_pair(area, (int)i));
@@ -530,7 +548,6 @@ public:
         bool foundCandidate = false;
 
         if (!validObjects.empty()) {
-            // Предпочитаем ближайший к предыдущей позиции
             int bestIdx = validObjects[0].second;
             if (lastValidCenter_.x > 0) {
                 float bestDist = 1e9f;
@@ -593,8 +610,10 @@ public:
 
 private:
     cv::Ptr<cv::CLAHE> clahe_;
-    cv::Mat kernel_;
+    cv::Mat kernel3_;
+    cv::Mat kernel5_;
     cv::Mat prevGray_;
+    std::vector<cv::Point2f> prevPoints_;
     cv::Point2f lastValidCenter_;
     int consecutiveDetections_;
     int consecutiveMisses_;

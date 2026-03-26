@@ -924,8 +924,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === CHECK MODE FIRST - BEFORE HEAVY PROCESSING ===
         // Track previous mode state to detect transitions
         static bool prevTrackingEnabled = true;
-        static double prevObjX = -1, prevObjY = -1;
-        static bool lockedOn = false;
         bool currentTrackingEnabled = trackingEnabled.load();
         bool modeJustChanged = (prevTrackingEnabled != currentTrackingEnabled);
         prevTrackingEnabled = currentTrackingEnabled;
@@ -941,10 +939,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastPitchDeg = 90.0;
         }
 
-        // При переключении FIXED → TRACKING: reset detector и lock
+        // При переключении FIXED → TRACKING: reset detector
         if (modeJustChanged && currentTrackingEnabled) {
             detector.reinitBGS();
-            prevObjX = -1; prevObjY = -1; lockedOn = false;
         }
 
         // === FRAME PREPARATION ===
@@ -973,57 +970,26 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4;
         }
 
-        // === ДВУХРЕЖИМНЫЙ КОНТРОЛЛЕР ===
-        // Захват: P-контроллер подтягивает к центру (gain=20)
-        // Сопровождение: серво следует за объектом (feedforward + мягкий P)
-        const double ROI_RADIUS = 200.0;   // px от центра для входа в lock
-        const double DEG_PER_PX = 72.0 / 1920.0;  // ~0.0375 deg/px (Arducam 64MP FOV)
-        const double LOCK_P_GAIN = 0.02;   // мягкий P в режиме сопровождения
-
+        // === P-КОНТРОЛЛЕР ===
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
 
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;
             double ey = d.y - cy;
-            double dist = std::sqrt(ex*ex + ey*ey);
 
-            if (dist < ROI_RADIUS && lockedOn && prevObjX > 0) {
-                // === РЕЖИМ СОПРОВОЖДЕНИЯ ===
-                // Feedforward: серво двигается на ту же величину, что и объект
-                double dx = d.x - prevObjX;
-                double dy = d.y - prevObjY;
-                double ffYaw   = -dx * DEG_PER_PX;
-                double ffPitch = -dy * DEG_PER_PX;
+            // Clamp max error: >300px from center = likely false detection
+            const double MAX_ERR = 300.0;
+            if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
+            if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-                // Мягкий P для медленного центрирования
-                double pYaw   = -ex * DEG_PER_PX * LOCK_P_GAIN;
-                double pPitch = -ey * DEG_PER_PX * LOCK_P_GAIN;
-
-                yawDeg   = lastYawDeg   + ffYaw   + pYaw;
-                pitchDeg = lastPitchDeg + ffPitch + pPitch;
-            } else {
-                // === РЕЖИМ ЗАХВАТА ===
-                // Clamp max error: >300px from center = likely false detection
-                const double MAX_ERR = 300.0;
-                if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
-                if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
-
-                double norm_ex = ex / cx;
-                double norm_ey = ey / cx;
-                const double MAX_STEP_DEG = 20.0;
-                double stepYaw   = norm_ex * MAX_STEP_DEG;
-                double stepPitch = norm_ey * MAX_STEP_DEG;
-                yawDeg   = lastYawDeg   - stepYaw;
-                pitchDeg = lastPitchDeg - stepPitch;
-
-                // Вход в lock при приближении к центру
-                if (dist < ROI_RADIUS) lockedOn = true;
-            }
-
-            // Обновляем предыдущую позицию объекта
-            prevObjX = d.x;
-            prevObjY = d.y;
+            double norm_ex = ex / cx;
+            double norm_ey = ey / cx;
+            const double MAX_STEP_DEG = 20.0;
+            double stepYaw   = norm_ex * MAX_STEP_DEG;
+            double stepPitch = norm_ey * MAX_STEP_DEG;
+            yawDeg   = lastYawDeg   - stepYaw;
+            pitchDeg = lastPitchDeg - stepPitch;
 
             if (yawDeg < 5.0) yawDeg = 5.0;
             if (yawDeg > 175.0) yawDeg = 175.0;
@@ -1036,11 +1002,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
-        } else if (!d.valid) {
-            // Потеря объекта — сброс lock
-            lockedOn = false;
-            prevObjX = -1;
-            prevObjY = -1;
+
+            // Без settle: OF компенсирует движение камеры
         }
 
         // ROI для визуализации
@@ -1066,7 +1029,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double dbg_ex = d.x - cx, dbg_ey = d.y - cy;
                 std::cout << "Target: (" << (int)d.x << ", " << (int)d.y
                           << ") err=(" << (int)dbg_ex << "," << (int)dbg_ey << "px)"
-                          << (lockedOn ? " [LOCKED]" : " [ACQUIRE]") << std::endl;
+                          << " [SERVO MOVE]" << std::endl;
             }
             std::cout << "Servo: Yaw=" << lastYawDeg << "\u00b0 Pitch=" << lastPitchDeg << "\u00b0" << std::endl;
             std::cout << "OF: fg=" << detector.lastFGPixels() << "px contours=" << detector.lastRawContours()

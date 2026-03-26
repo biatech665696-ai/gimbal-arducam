@@ -387,6 +387,7 @@ class MotionDetector
 public:
     MotionDetector()
         : clahe_(cv::createCLAHE(2.0, cv::Size(8, 8)))
+        , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
         , consecutiveDetections_(0)
@@ -394,6 +395,7 @@ public:
         , lastFGPixels_(0)
         , lastRawContours_(0)
         , lastGlobalFlow_(0, 0)
+        , fgGateCooldown_(0)
     {}
 
     int lastFGPixels() const { return lastFGPixels_; }
@@ -413,7 +415,7 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
-        const int MIN_DETECTIONS = 2;
+        const int MIN_DETECTIONS = 3;
         const int MAX_MISSES = 60;
         const float FG_THRESHOLD = 25.0f;  // порог разницы от bg model
         const float BG_ALPHA = 0.97f;      // 97% старый bg, 3% новый кадр (~1.5s tau)
@@ -428,8 +430,7 @@ public:
         else
             gray = roi.clone();
 
-        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.0);
-        clahe_->apply(gray, gray);
+        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.5);
 
         cv::Mat curFloat;
         gray.convertTo(curFloat, CV_32F);
@@ -501,31 +502,43 @@ public:
         }
 
         // === FOREGROUND DETECTION: |warped_bg - current| > threshold ===
+        // Normalize global brightness to compensate for auto-exposure drift
+        float bgMean = (float)cv::mean(bgWarped)[0];
+        float curMean = (float)cv::mean(curFloat)[0];
+        cv::Mat bgCorrected;
+        bgWarped.convertTo(bgCorrected, CV_32F, 1.0, curMean - bgMean);
+
         cv::Mat diff;
-        cv::absdiff(bgWarped, curFloat, diff);
+        cv::absdiff(bgCorrected, curFloat, diff);
         cv::Mat diffU8;
         diff.convertTo(diffU8, CV_8U);
         cv::Mat fgMask;
         cv::threshold(diffU8, fgMask, (int)FG_THRESHOLD, 255, cv::THRESH_BINARY);
 
         // === UPDATE BACKGROUND MODEL ===
-        // Where NOT foreground: blend bg toward current (learn background)
-        // Where foreground: keep old bg (don't absorb moving object)
-        cv::Mat newBg;
-        cv::addWeighted(bgWarped, BG_ALPHA, curFloat, 1.0 - BG_ALPHA, 0.0, newBg);
-        bgWarped.copyTo(newBg, fgMask);  // fg pixels: keep old bg
-        bgModel_ = newBg;
+        // Learn everywhere at same rate. Moving objects pass through each pixel
+        // in 2-5 frames — too fast to absorb at alpha=0.97 (need ~30 frames).
+        // This also fixes the initial deadlock: auto-exposure shift made ALL pixels
+        // "foreground", and protected fg pixels never learned — eternal fg.
+        cv::addWeighted(bgWarped, BG_ALPHA, curFloat, 1.0 - BG_ALPHA, 0.0, bgModel_);
 
-        // === FG PIXEL GATE (safety) ===
+        // === FG PIXEL GATE with hysteresis ===
         lastFGPixels_ = cv::countNonZero(fgMask);
         if (lastFGPixels_ > 500) {
-            // Too much foreground = imperfect compensation or lighting change
+            lastRawContours_ = 0;
+            consecutiveDetections_ = 0;
+            fgGateCooldown_ = 10;  // 10 frames (~0.5s) cooldown after spike
+            return d;
+        }
+        if (fgGateCooldown_ > 0) {
+            fgGateCooldown_--;
             lastRawContours_ = 0;
             consecutiveDetections_ = 0;
             return d;
         }
 
-        // Morphology: only CLOSE to connect nearby pixels, NO OPEN (preserve small objects)
+        // Morphology: OPEN(2x2) kills single-pixel noise, CLOSE(3x3) connects nearby
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel2_);
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
@@ -550,7 +563,7 @@ public:
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
             if (!atEdge &&
-                area >= 3.0 && area <= 1500.0 &&
+                area >= 6.0 && area <= 1500.0 &&
                 solidity > 0.2 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
                 bbox.width <= 100 && bbox.height <= 100 &&
@@ -628,6 +641,7 @@ public:
 
 private:
     cv::Ptr<cv::CLAHE> clahe_;
+    cv::Mat kernel2_;
     cv::Mat kernel3_;
     cv::Mat bgModel_;     // float32, running average background with motion compensation
     cv::Mat prevGray_;    // uint8, for LK tracking
@@ -637,6 +651,7 @@ private:
     int lastFGPixels_;
     int lastRawContours_;
     cv::Point2f lastGlobalFlow_;
+    int fgGateCooldown_;
 };
 
 /* =============== ROI COMPUTATION =============== */
@@ -1046,7 +1061,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double norm_ex = ex / cx;
             double norm_ey = ey / cx;
-            const double MAX_STEP_DEG = 20.0;  // tuned: 10 too slow, 35 overshoot
+            const double MAX_STEP_DEG = 10.0;  // 20 was too aggressive for false positives
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
             yawDeg   = lastYawDeg   - stepYaw;

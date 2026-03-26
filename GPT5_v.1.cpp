@@ -1092,37 +1092,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastSentPitchDeg = pitchDeg;
 
             // Без settle: OF компенсирует движение камеры
-        } else if (currentTrackingEnabled && velHistory.size() >= 3) {
-            // === VELOCITY COASTING: servo continues moving during blind frames ===
-            auto& [t0, x0, y0] = velHistory.front();
-            auto& [t1, x1, y1] = velHistory.back();
-            double dt = t1 - t0;
-            if (dt > 0.05 && dt < 1.0) {
-                double vx = (x1 - x0) / dt;
-                double vy = (y1 - y0) / dt;
-                // Coast by one frame interval (~55ms at 18fps)
-                const double COAST_DT = 0.055;
-                double coastYaw   = vx * COAST_DT * DEG_PER_PX;
-                double coastPitch = vy * COAST_DT * DEG_PER_PX;
-                // Clamp coasting to prevent runaway
-                const double MAX_COAST_DEG = 1.5;
-                if (coastYaw > MAX_COAST_DEG) coastYaw = MAX_COAST_DEG;
-                if (coastYaw < -MAX_COAST_DEG) coastYaw = -MAX_COAST_DEG;
-                if (coastPitch > MAX_COAST_DEG) coastPitch = MAX_COAST_DEG;
-                if (coastPitch < -MAX_COAST_DEG) coastPitch = -MAX_COAST_DEG;
-
-                yawDeg   = lastYawDeg   - coastYaw;
-                pitchDeg = lastPitchDeg - coastPitch;
-                if (yawDeg < 5.0) yawDeg = 5.0;
-                if (yawDeg > 175.0) yawDeg = 175.0;
-                if (pitchDeg < 5.0) pitchDeg = 5.0;
-                if (pitchDeg > 175.0) pitchDeg = 175.0;
-
-                lastYawDeg = yawDeg;
-                lastPitchDeg = pitchDeg;
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-            }
         }
 
         // ROI для визуализации

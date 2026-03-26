@@ -18,8 +18,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <dirent.h>
 #include <unistd.h>
+#include <pthread.h>
 
 // Прототип функции для очистки мешающих процессов
 void killPreviousInstances();
@@ -144,8 +148,142 @@ std::mutex displayMutex;
 cv::Mat displayFrame;
 std::atomic<bool> hasNewFrame(false);
 
-// Network stream
-cv::VideoWriter streamWriter;
+// HTTP MJPEG streaming globals
+std::atomic<bool> streamRunning(false);
+cv::Mat streamFrame;
+std::mutex streamMutex;
+const int STREAM_PORT = 8080;
+pthread_t streamThread;
+
+// Per-connection MJPEG client handler
+static void* handleHttpClient(void* arg) {
+    int clientSocket = *(int*)arg;
+    delete (int*)arg;
+
+    char buffer[1024] = {0};
+    recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
+    std::string request(buffer);
+
+    bool isStreamRequest = (request.rfind("GET /stream.mjpg", 0) == 0 ||
+                           request.rfind("GET /video", 0) == 0);
+    bool isRootRequest = (request.rfind("GET / ", 0) == 0 ||
+                         request.rfind("GET /\r", 0) == 0);
+
+    if (isRootRequest) {
+        std::string html =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Connection: close\r\n\r\n"
+            "<html><body style='margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh'>"
+            "<img src='/stream.mjpg' style='max-width:100%;max-height:100%'>"
+            "</body></html>";
+        send(clientSocket, html.c_str(), html.length(), 0);
+        close(clientSocket);
+        return nullptr;
+    }
+
+    if (!isStreamRequest) {
+        std::string notFound = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404";
+        send(clientSocket, notFound.c_str(), notFound.length(), 0);
+        close(clientSocket);
+        return nullptr;
+    }
+
+    // Send MJPEG stream
+    std::string header =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: multipart/x-mixed-replace; boundary=frame\r\n"
+        "Cache-Control: no-cache\r\n"
+        "Access-Control-Allow-Origin: *\r\n"
+        "\r\n";
+    send(clientSocket, header.c_str(), header.length(), 0);
+
+    while (streamRunning) {
+        cv::Mat frame;
+        {
+            std::lock_guard<std::mutex> lock(streamMutex);
+            if (streamFrame.empty()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            frame = streamFrame.clone();
+        }
+
+        std::vector<uchar> jpg;
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
+        if (!cv::imencode(".jpg", frame, jpg, params) || jpg.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        std::ostringstream frameHeader;
+        frameHeader << "--frame\r\n"
+                   << "Content-Type: image/jpeg\r\n"
+                   << "Content-Length: " << jpg.size() << "\r\n\r\n";
+
+        std::string hdr = frameHeader.str();
+        ssize_t sent = send(clientSocket, hdr.c_str(), hdr.length(), MSG_NOSIGNAL);
+        if (sent <= 0) break;
+        sent = send(clientSocket, jpg.data(), jpg.size(), MSG_NOSIGNAL);
+        if (sent <= 0) break;
+        sent = send(clientSocket, "\r\n", 2, MSG_NOSIGNAL);
+        if (sent <= 0) break;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+    }
+
+    close(clientSocket);
+    return nullptr;
+}
+
+void* httpStreamServer(void* arg) {
+    int serverSocket = socket(AF_INET, SOCK_STREAM, 0);
+    if (serverSocket < 0) {
+        std::cerr << "[HTTP] Failed to create socket" << std::endl;
+        return nullptr;
+    }
+
+    int opt = 1;
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(STREAM_PORT);
+
+    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        std::cerr << "[HTTP] Failed to bind port " << STREAM_PORT << ": " << strerror(errno) << std::endl;
+        close(serverSocket);
+        return nullptr;
+    }
+
+    if (listen(serverSocket, 5) < 0) {
+        std::cerr << "[HTTP] Failed to listen" << std::endl;
+        close(serverSocket);
+        return nullptr;
+    }
+
+    std::cout << "\u2713 HTTP MJPEG stream: http://169.254.67.80:" << STREAM_PORT << "/" << std::endl;
+    std::cout << "  Direct: http://169.254.67.80:" << STREAM_PORT << "/stream.mjpg" << std::endl;
+
+    while (streamRunning) {
+        sockaddr_in clientAddr{};
+        socklen_t clientLen = sizeof(clientAddr);
+        int clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientLen);
+        if (clientSocket < 0) continue;
+
+        pthread_t clientThread;
+        int* argSock = new int(clientSocket);
+        if (pthread_create(&clientThread, nullptr, handleHttpClient, argSock) == 0) {
+            pthread_detach(clientThread);
+        } else {
+            handleHttpClient(argSock);
+        }
+    }
+
+    close(serverSocket);
+    return nullptr;
+}
 
 #define GPIO_HORIZONTAL 18
 #define GPIO_VERTICAL 19
@@ -1305,16 +1443,11 @@ int main()
     cv::setWindowProperty("Predictive Gimbal Control", cv::WND_PROP_TOPMOST, 1);
     std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
 
-    // Setup network stream via GStreamer UDP (H.264 RTP)
-    std::string streamPipeline = "appsrc ! videoconvert ! video/x-raw,format=I420 ! "
-        "x264enc tune=zerolatency bitrate=2000 speed-preset=ultrafast key-int-max=30 ! "
-        "rtph264pay config-interval=1 pt=96 ! "
-        "udpsink host=169.254.67.80 port=5000 sync=false";
-    streamWriter.open(streamPipeline, cv::CAP_GSTREAMER, 0, 18.0, cv::Size(960, 540));
-    if (streamWriter.isOpened()) {
-        std::cout << "✓ Network stream: UDP H.264 RTP -> 169.254.67.80:5000" << std::endl;
-    } else {
-        std::cerr << "✗ Network stream: FAILED to open GStreamer pipeline" << std::endl;
+    // Start HTTP MJPEG stream server
+    streamRunning = true;
+    if (pthread_create(&streamThread, nullptr, httpStreamServer, nullptr) != 0) {
+        std::cerr << "✗ Failed to start HTTP stream server" << std::endl;
+        streamRunning = false;
     }
     
     // Display loop
@@ -1331,11 +1464,10 @@ int main()
             
             if (!frame.empty()) {
                 cv::imshow("Predictive Gimbal Control", frame);
-                // Send to network stream
-                if (streamWriter.isOpened()) {
-                    cv::Mat streamFrame;
+                // Update HTTP MJPEG stream frame
+                if (streamRunning) {
+                    std::lock_guard<std::mutex> lock(streamMutex);
                     cv::resize(frame, streamFrame, cv::Size(960, 540));
-                    streamWriter.write(streamFrame);
                 }
             }
         }
@@ -1386,9 +1518,10 @@ int main()
     setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
-    if (streamWriter.isOpened()) {
-        streamWriter.release();
-        std::cout << "Network stream closed." << std::endl;
+    if (streamRunning) {
+        streamRunning = false;
+        pthread_join(streamThread, nullptr);
+        std::cout << "HTTP stream server stopped." << std::endl;
     }
 
     std::cout << "Disabling PWM..." << std::endl;

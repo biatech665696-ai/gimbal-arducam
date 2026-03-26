@@ -506,6 +506,18 @@ public:
         // Сохраняем для следующего кадра
         prevGray_ = gray.clone();
 
+        // === SKIP DETECTION WHEN CAMERA JUST MOVED ===
+        // После хода серво компенсация неидеальна → fg утечка → каскад.
+        // Пропускаем 1 кадр (НЕ сбрасываем prevGray — он уже обновлён).
+        float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
+                                   lastGlobalFlow_.y * lastGlobalFlow_.y);
+        if (flowMag > 3.0f) {
+            lastFGPixels_ = cv::countNonZero(fgMask);
+            lastRawContours_ = 0;
+            // Не трогаем consecutive счётчики — просто пропускаем кадр
+            return d;
+        }
+
         // Морфология
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel5_);  // убить шум
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);  // соединить

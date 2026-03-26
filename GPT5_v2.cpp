@@ -150,6 +150,8 @@ std::atomic<bool> hasNewFrame(false);
 
 // HTTP MJPEG streaming globals
 std::atomic<bool> streamRunning(false);
+std::atomic<bool> remoteQuit(false);
+std::atomic<bool> remoteToggle(false);
 cv::Mat streamFrame;
 std::mutex streamMutex;
 const int STREAM_PORT = 8080;
@@ -168,14 +170,45 @@ static void* handleHttpClient(void* arg) {
                            request.rfind("GET /video", 0) == 0);
     bool isRootRequest = (request.rfind("GET / ", 0) == 0 ||
                          request.rfind("GET /\r", 0) == 0);
+    bool isCmdRequest = (request.rfind("GET /cmd/", 0) == 0);
+
+    if (isCmdRequest) {
+        std::string ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                        "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK";
+        // Extract command: /cmd/X
+        size_t cmdStart = 9; // length of "GET /cmd/"
+        size_t cmdEnd = request.find(' ', cmdStart);
+        std::string cmd = request.substr(cmdStart, cmdEnd - cmdStart);
+        if (cmd == "q") {
+            std::cout << "\n[REMOTE] Quit command received" << std::endl;
+            remoteQuit = true;
+        } else if (cmd == "f") {
+            std::cout << "\n[REMOTE] Toggle mode command received" << std::endl;
+            remoteToggle = true;
+        }
+        send(clientSocket, ok.c_str(), ok.length(), 0);
+        close(clientSocket);
+        return nullptr;
+    }
 
     if (isRootRequest) {
         std::string html =
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: text/html\r\n"
             "Connection: close\r\n\r\n"
-            "<html><body style='margin:0;background:#000;display:flex;justify-content:center;align-items:center;height:100vh'>"
-            "<img src='/stream.mjpg' style='max-width:100%;max-height:100%'>"
+            "<html><body style='margin:0;background:#000;display:flex;flex-direction:column;"
+            "justify-content:center;align-items:center;height:100vh' tabindex='0'>"
+            "<img src='/stream.mjpg' style='max-width:100%;max-height:90vh'>"
+            "<div style='color:#0ff;font:20px monospace;margin-top:10px'>Q: Quit | F: Toggle mode</div>"
+            "<script>"
+            "document.body.focus();"
+            "document.addEventListener('keydown',function(e){"
+            "  var k=e.key.toLowerCase();"
+            "  if(k=='q'||k=='escape'||k=='f'){"
+            "    fetch('/cmd/'+( k=='escape'?'q':k ));"
+            "  }"
+            "});"
+            "</script>"
             "</body></html>";
         send(clientSocket, html.c_str(), html.length(), 0);
         close(clientSocket);
@@ -1486,11 +1519,11 @@ int main()
             std::cout << "\n[KEY DETECTED] Code: " << key << " (char: '" << (char)key << "')" << std::endl;
         }
         
-        if (key == 'q' || key == 'Q' || key == 27) {  // Q or ESC - quit
-            std::cout << "\n=== QUIT KEY PRESSED ===" << std::endl;
+        if (key == 'q' || key == 'Q' || key == 27 || remoteQuit.load()) {  // Q or ESC - quit (local or remote)
+            std::cout << "\n=== QUIT " << (remoteQuit.load() ? "(REMOTE)" : "(LOCAL)") << " ===" << std::endl;
             run = false;
             break;
-        } else if (key == 'f' || key == 'F') {  // F - toggle tracking mode
+        } else if (key == 'f' || key == 'F' || remoteToggle.exchange(false)) {  // F - toggle tracking mode (local or remote)
             std::cout << "\n=== F KEY DETECTED - TOGGLING MODE ===" << std::endl;
             // Атомарный toggle: XOR с 1 (true)
             bool wasEnabled = trackingEnabled.exchange(!trackingEnabled.load());

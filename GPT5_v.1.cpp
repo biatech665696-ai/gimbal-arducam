@@ -499,7 +499,7 @@ public:
             lr = 0.2;               // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.012;             // Stable: moderate learning (trail absorbed ~4.5s vs 14s)
+            lr = 0.008;             // Stable: moderate learning (trail absorbed ~7s)
             if (postCooldownLR_ > 0) {
                 lr = 0.08;           // Post-cooldown: absorb residuals faster
                 postCooldownLR_--;
@@ -631,6 +631,9 @@ public:
                             consecutiveMisses_ = 0;
                         } else {
                             consecutiveDetections_ = 0;
+                            // Update anchor so we don't get stuck on stale reference points
+                            prevValidCenter_ = lastValidCenter_;
+                            lastValidCenter_ = currentCenter;
                         }
                     } else {
                         consecutiveDetections_ = 0;

@@ -415,8 +415,8 @@ public:
     {
         const int MIN_DETECTIONS = 2;  // OF более стабилен — 2 кадров достаточно
         const int MAX_MISSES = 60;
-        const float FLOW_THRESHOLD = 1.5f;  // min pixels/frame для "движение"
-        const float INDEPENDENT_THRESHOLD = 1.0f;  // отличие от глобального flow
+        const float FLOW_THRESHOLD = 3.0f;  // min pixels/frame для "движение"
+        const float INDEPENDENT_THRESHOLD = 3.0f;  // отличие от глобального flow (sensor noise ~1-2px)
 
         Detection d;
         d.valid = false;
@@ -482,10 +482,9 @@ public:
         fgMask.convertTo(fgMask, CV_8U);
 
         // Морфология — убрать шум, соединить близкие области
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel_);
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel_);
-        // Дилатация для соединения фрагментов
-        cv::dilate(fgMask, fgMask, kernel_, cv::Point(-1,-1), 2);
+        cv::Mat kernel5 = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel5);  // убить мелкий шум
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel_);  // соединить
 
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
@@ -514,11 +513,11 @@ public:
             double meanMag = cv::mean(magnitude, contourMask)[0];
 
             if (!atEdge &&
-                area >= 4.0 && area <= 500.0 &&
-                solidity > 0.3 &&
+                area >= 5.0 && area <= 2000.0 &&
+                solidity > 0.2 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
-                bbox.width <= 80 && bbox.height <= 80 &&
-                aspectRatio > 0.12 && aspectRatio < 8.0 &&
+                bbox.width <= 120 && bbox.height <= 120 &&
+                aspectRatio > 0.1 && aspectRatio < 10.0 &&
                 meanMag > FLOW_THRESHOLD) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));

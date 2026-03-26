@@ -980,7 +980,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double norm_ex = ex / cx;
             double norm_ey = ey / cx;
-            const double MAX_STEP_DEG = 15.0;
+            const double MAX_STEP_DEG = 20.0;
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
             yawDeg   = lastYawDeg   - stepYaw;

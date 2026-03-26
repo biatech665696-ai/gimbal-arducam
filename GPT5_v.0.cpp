@@ -404,7 +404,7 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double learningRate = 0.005)
     {
-        const int MIN_DETECTIONS = 2;
+        const int MIN_DETECTIONS = 3;
         const int MAX_MISSES = 60;
 
         Detection d;
@@ -441,7 +441,14 @@ public:
             double solidity = (bboxArea > 0) ? (area / bboxArea) : 0;
             double aspectRatio = (double)bbox.width / (double)bbox.height;
 
-            if (area >= 1.0 && area <= 250.0 &&
+            // Edge rejection: контуры у границ кадра = артефакты MOG2
+            const int EDGE_MARGIN = 5;  // пикселей в 0.25x (=20px в оригинале)
+            bool atEdge = (bbox.x <= EDGE_MARGIN || bbox.y <= EDGE_MARGIN ||
+                          bbox.x + bbox.width >= roi.cols - EDGE_MARGIN ||
+                          bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
+
+            if (!atEdge &&
+                area >= 1.0 && area <= 250.0 &&
                 solidity > 0.42 &&
                 bbox.width >= 1 && bbox.height >= 1 &&
                 bbox.width <= 60 && bbox.height <= 60 &&
@@ -929,10 +936,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Нет postSettle с LR=0.3 — объект не поглощается в фон.
         bool cameraSettling = (servoSettleFrames > 0);
         if (cameraSettling) {
-            // LR=0: НЕ обновлять BGS во время дрожания камеры.
-            // Старый LR=0.7 поглощал объект в фон → 2с слепота после settle.
-            // Сдвиг камеры на 2-5° = 5-10px при 0.25x → MOG2 справится сам.
-            bgsLearningRate = 0;
+            // LR=0.05: мягко адаптировать BGS к новой позиции камеры.
+            // LR=0 = BGS не учится → 30+ кадров слепоты после каждого хода.
+            // LR=0.7 = BGS поглощает объект в фон.
+            // LR=0.05 = компромисс: за 4 кадра адаптирует фон, объект не поглощён.
+            bgsLearningRate = 0.05;
             servoSettleFrames--;
         }
         bool doReinitNow = needsBGSReinit;
@@ -982,13 +990,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             d.all_boxes.clear();
         }
 
-        // Подавляем детекцию при settle (камера дрожит → BGS шумит).
-        // Короткое окно (4 кадра ~200ms) — Kalman ДЕРЖИТ позицию (без decay),
-        // серво не drift'ит к центру.
-        if (cameraSettling) {
-            d.valid = false;
-            d.all_boxes.clear();
-        }
+        // НЕ подавляем детекцию при settle — noise gate (>10 объектов)
+        // и edge rejection защищают от помех. Подавление давало ~2с слепоты.
 
         // ROI для визуализации (не для детекции!)
         if (d.valid) {
@@ -1013,18 +1016,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             box.height *= 4;
         }
 
-        double theta=0;
-        double phi=0;
-
-        if(d.valid)
-            pixelToAngles(d.x, d.y, cx, cy, theta, phi);
-
-        AngleState s=
-            kalman.update(theta,phi,d.valid);
-
-        if (USE_PREDICTIVE_CONTROL) {
-            predictFuture(s,SYSTEM_DELAY);
-        }
+        // Kalman/predictFuture удалены — серво управляется прямым P-контроллером.
+        // Kalman velocity prediction вызывал overshoot при редкой детекции.
 
         // === SERVO CONTROL (only in TRACKING mode) ===
         
@@ -1063,7 +1056,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double norm_ex = ex / cx;  // [-1..+1]
             double norm_ey = ey / cx;  // cx для обеих осей
 
-            const double MAX_STEP_DEG = 5.0;  // макс шаг за кадр
+            const double MAX_STEP_DEG = 10.0;  // макс шаг за кадр (нужен большой при редкой детекции)
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
 
@@ -1138,10 +1131,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === TRAJECTORY цента кадра (куда серво целится) — cyan ===
         static std::deque<cv::Point2f> aimHistory;
         if (d.valid) {
-            // Центр кадра в пикселях минус остаточная ошибка Kalman после predictFuture
-            // Это куда серво фактически нацелилось на последнем шаге
-            aimHistory.push_back(cv::Point2f((float)(cx + s.theta * F),
-                                             (float)(cy + s.phi   * F)));
+            // Центр кадра в пикселях — куда серво фактически нацелилось
+            aimHistory.push_back(cv::Point2f((float)d.x, (float)d.y));
             if (aimHistory.size() > 30) aimHistory.pop_front();
         }
         for (int i = 0; i < (int)aimHistory.size(); i++) {
@@ -1152,13 +1143,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             cv::circle(display, aimHistory[i], 4, col, -1);
         }
 
-        // Рисуем куда целится серво (предсказанная позиция после predictFuture)
-        // ex, ey уже вычислены выше, рисуем крест в точке предсказания
+        // Рисуем куда целится серво (позиция детекции)
         if (d.valid) {
-            double predX = cx + s.theta * F;
-            double predY = cy + s.phi   * F;
-            int px = static_cast<int>(predX);
-            int py = static_cast<int>(predY);
+            int px = static_cast<int>(d.x);
+            int py = static_cast<int>(d.y);
             if (px > 0 && px < display.cols && py > 0 && py < display.rows) {
                 cv::drawMarker(display, cv::Point(px, py),
                               cv::Scalar(0, 255, 255), cv::MARKER_CROSS, 20, 2);

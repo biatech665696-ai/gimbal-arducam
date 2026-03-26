@@ -390,6 +390,7 @@ public:
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
+        , prevValidCenter_(-1, -1)
         , consecutiveDetections_(0)
         , consecutiveMisses_(0)
         , lastFGPixels_(0)
@@ -498,7 +499,7 @@ public:
             lr = 0.2;               // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.004;             // Stable: slow learning
+            lr = 0.012;             // Stable: moderate learning (trail absorbed ~4.5s vs 14s)
             if (postCooldownLR_ > 0) {
                 lr = 0.08;           // Post-cooldown: absorb residuals faster
                 postCooldownLR_--;
@@ -611,9 +612,26 @@ public:
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
                     if (distance < 50.0) {  // at 0.25x = 200px full-res
-                        foundCandidate = true;
-                        consecutiveDetections_++;
-                        consecutiveMisses_ = 0;
+                        // Direction check: reject if moving back toward previous position
+                        // (MOG2 ghost at t-1 position looks like a valid nearby detection)
+                        bool directionOK = true;
+                        if (prevValidCenter_.x > 0 && distance > 3.0f) {
+                            cv::Point2f prevDir = lastValidCenter_ - prevValidCenter_;
+                            cv::Point2f newDir = currentCenter - lastValidCenter_;
+                            float dot = prevDir.x * newDir.x + prevDir.y * newDir.y;
+                            float prevMag = cv::norm(prevDir);
+                            if (prevMag > 3.0f && dot < -0.5f * prevMag * distance) {
+                                // New detection goes backward (>120° from prev direction)
+                                directionOK = false;
+                            }
+                        }
+                        if (directionOK) {
+                            foundCandidate = true;
+                            consecutiveDetections_++;
+                            consecutiveMisses_ = 0;
+                        } else {
+                            consecutiveDetections_ = 0;
+                        }
                     } else {
                         consecutiveDetections_ = 0;
                         lastValidCenter_ = currentCenter;
@@ -633,6 +651,7 @@ public:
                     d.box_w = bbox.width;
                     d.box_h = bbox.height;
                     d.valid = true;
+                    prevValidCenter_ = lastValidCenter_;
                     lastValidCenter_ = currentCenter;
                 }
             }
@@ -654,6 +673,7 @@ private:
     cv::Mat kernel3_;
     cv::Mat prevGray_;    // uint8, for LK tracking
     cv::Point2f lastValidCenter_;
+    cv::Point2f prevValidCenter_;  // one before lastValidCenter_ for direction check
     int consecutiveDetections_;
     int consecutiveMisses_;
     int lastFGPixels_;

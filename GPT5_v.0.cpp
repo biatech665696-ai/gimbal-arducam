@@ -918,12 +918,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double lastSentYawDeg = 90.0;
     double lastSentPitchDeg = 90.0;
 
-    // === MOG2 + DEAD ZONE ===
-    // MOG2 детектирует каждый кадр. Серво двигается только если объект
-    // за пределами мёртвой зоны (>DEAD_ZONE_PX от центра кадра).
-    // Объект в центре → серво стоит → MOG2 работает непрерывно на 19fps.
-    // При отклонении → шаг серво → settle (3 кадра ~150ms) → MOG2 адаптирует фон.
-    const double DEAD_ZONE_PX = 60.0;  // full-res пикс., ~3% от 1920
+    // === MOG2 + P-CONTROLLER ===
+    // MOG2 детектирует каждый кадр. Серво всегда двигается к центру кадра.
+    // При сдвиге → шаг серво → settle (5 кадров ~250ms) → MOG2 адаптирует фон.
     int servoSettleFrames = 0;
     int bgsWarmupFrames = 0;
 
@@ -1027,7 +1024,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4;
         }
 
-        // === P-КОНТРОЛЛЕР + DEAD ZONE ===
+        // === P-КОНТРОЛЛЕР ===
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
 
@@ -1035,35 +1032,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ex = d.x - cx;
             double ey = d.y - cy;
 
-            // Dead zone: не двигаем серво если объект близко к центру.
-            // Пока объект внутри ±60px → серво стоит → MOG2 работает
-            // непрерывно без settle-перерывов. Только при выходе за
-            // мёртвую зону → коррекция → короткий settle.
-            if (std::abs(ex) > DEAD_ZONE_PX || std::abs(ey) > DEAD_ZONE_PX) {
-                double norm_ex = ex / cx;
-                double norm_ey = ey / cx;
-                const double MAX_STEP_DEG = 10.0;
-                double stepYaw   = norm_ex * MAX_STEP_DEG;
-                double stepPitch = norm_ey * MAX_STEP_DEG;
-                yawDeg   = lastYawDeg   - stepYaw;
-                pitchDeg = lastPitchDeg - stepPitch;
+            double norm_ex = ex / cx;
+            double norm_ey = ey / cx;
+            const double MAX_STEP_DEG = 10.0;
+            double stepYaw   = norm_ex * MAX_STEP_DEG;
+            double stepPitch = norm_ey * MAX_STEP_DEG;
+            yawDeg   = lastYawDeg   - stepYaw;
+            pitchDeg = lastPitchDeg - stepPitch;
 
-                if (yawDeg < 5.0) yawDeg = 5.0;
-                if (yawDeg > 175.0) yawDeg = 175.0;
-                if (pitchDeg < 5.0) pitchDeg = 5.0;
-                if (pitchDeg > 175.0) pitchDeg = 175.0;
+            if (yawDeg < 5.0) yawDeg = 5.0;
+            if (yawDeg > 175.0) yawDeg = 175.0;
+            if (pitchDeg < 5.0) pitchDeg = 5.0;
+            if (pitchDeg > 175.0) pitchDeg = 175.0;
 
-                lastYawDeg = yawDeg;
-                lastPitchDeg = pitchDeg;
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-                lastSentYawDeg = yawDeg;
-                lastSentPitchDeg = pitchDeg;
+            lastYawDeg = yawDeg;
+            lastPitchDeg = pitchDeg;
+            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+            lastSentYawDeg = yawDeg;
+            lastSentPitchDeg = pitchDeg;
 
-                // Settle: 5 кадров (~250ms) для адаптации BGS к сдвигу
-                servoSettleFrames = 5;
-                detector.resetConsecutive();
-            }
+            // Settle: 5 кадров (~250ms) для адаптации BGS к сдвигу
+            servoSettleFrames = 5;
+            detector.resetConsecutive();
         }
 
         // ROI для визуализации
@@ -1089,8 +1080,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double dbg_ex = d.x - cx, dbg_ey = d.y - cy;
                 std::cout << "Target: (" << (int)d.x << ", " << (int)d.y
                           << ") err=(" << (int)dbg_ex << "," << (int)dbg_ey << "px)"
-                          << (std::abs(dbg_ex) <= DEAD_ZONE_PX && std::abs(dbg_ey) <= DEAD_ZONE_PX ? " [IN ZONE]" : " [SERVO MOVE]")
-                          << std::endl;
+                          << " [SERVO MOVE]" << std::endl;
             }
             std::cout << "Servo: Yaw=" << lastYawDeg << "\u00b0 Pitch=" << lastPitchDeg << "\u00b0" << std::endl;
             std::cout << "BGS: fg=" << detector.lastFGPixels() << "px contours=" << detector.lastRawContours()
@@ -1118,10 +1108,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
             cv::circle(display, trajHistory[i], 4, col, -1);
         }
-
-        // === DEAD ZONE — белый круг вокруг центра кадра ===
-        cv::circle(display, cv::Point((int)cx, (int)cy), (int)DEAD_ZONE_PX,
-                   cv::Scalar(255, 255, 255), 1);
 
         // Рисуем куда целится серво (позиция детекции)
         if (d.valid) {

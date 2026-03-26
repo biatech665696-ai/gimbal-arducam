@@ -998,7 +998,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // FG pixel gate: слишком много foreground = камера сдвинулась.
         // Нормальная детекция: fg=10-100px. Сдвиг камеры: fg=3000-35000px.
-        if (detector.lastFGPixels() > 2000) {
+        if (detector.lastFGPixels() > 500) {
             d.valid = false;
             d.all_boxes.clear();
         }
@@ -1034,7 +1034,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double norm_ex = ex / cx;
             double norm_ey = ey / cx;
-            const double MAX_STEP_DEG = 35.0;  // ≈ FOV_H/2 для OV64A40 ~70° FOV
+            const double MAX_STEP_DEG = 20.0;  // tuned: 10 too slow, 35 overshoot
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
             yawDeg   = lastYawDeg   - stepYaw;
@@ -1052,8 +1052,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
 
-            // Settle: 2 кадра (~100ms) для адаптации BGS к сдвигу
-            servoSettleFrames = 2;
+            // Settle: 3 кадра (~150ms) для адаптации BGS к сдвигу
+            servoSettleFrames = 3;
             detector.resetConsecutive();
         }
 

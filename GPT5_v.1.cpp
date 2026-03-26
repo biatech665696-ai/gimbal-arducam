@@ -970,9 +970,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4;
         }
 
-        // === P-КОНТРОЛЛЕР ===
+        // === ПРЯМОЕ НАВЕДЕНИЕ ===
+        // Объект на ex пикселей от центра = ex * (FOV/width) градусов от серво
+        // Серво перемещается ровно на угловое смещение объекта (100% коррекция)
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
+        const double DEG_PER_PX = 72.0 / 1920.0;  // ~0.0375 deg/px (Arducam 64MP ~72° HFOV)
 
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;
@@ -983,11 +986,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            double norm_ex = ex / cx;
-            double norm_ey = ey / cx;
-            const double MAX_STEP_DEG = 20.0;
-            double stepYaw   = norm_ex * MAX_STEP_DEG;
-            double stepPitch = norm_ey * MAX_STEP_DEG;
+            double stepYaw   = ex * DEG_PER_PX;
+            double stepPitch = ey * DEG_PER_PX;
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;
 

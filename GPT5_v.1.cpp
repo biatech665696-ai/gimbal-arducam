@@ -494,7 +494,7 @@ public:
             lr = 0.2;               // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.008;             // Stable: slow learning
+            lr = 0.004;             // Stable: slow learning
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -980,7 +980,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double norm_ex = ex / cx;
             double norm_ey = ey / cx;
-            const double MAX_STEP_DEG = 10.0;  // 20 was too aggressive for false positives
+            const double MAX_STEP_DEG = 15.0;
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
             yawDeg   = lastYawDeg   - stepYaw;

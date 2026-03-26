@@ -1017,7 +1017,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
-        const double DEG_PER_PX = 72.0 / 1920.0;  // 0.0375 deg/px (exact FOV, lead handles lag)
+        const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;  // 0.03938 deg/px (1.05x, never overshoots center)
 
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;
@@ -1032,11 +1032,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 if (dt > 0.05 && dt < 2.0) {
                     double vx = (x1 - x0) / dt;
                     double vy = (y1 - y0) / dt;
-                    const double LEAD_TIME = 0.08; // predict 80ms ahead
+                    const double LEAD_TIME = 0.12; // predict 120ms ahead
                     double leadX = vx * LEAD_TIME;
                     double leadY = vy * LEAD_TIME;
                     // Clamp lead to ±40px: prevent wild jumps from noisy velocity
-                    const double MAX_LEAD = 40.0;
+                    const double MAX_LEAD = 60.0;
                     if (leadX > MAX_LEAD) leadX = MAX_LEAD;
                     if (leadX < -MAX_LEAD) leadX = -MAX_LEAD;
                     if (leadY > MAX_LEAD) leadY = MAX_LEAD;

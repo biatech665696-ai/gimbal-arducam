@@ -820,8 +820,6 @@ void predictFuture(AngleState &s,double dt)
 void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 {
     cv::VideoCapture cap;
-    bool usingRealCamera = false;
-    int failureCount = 0;
     
     std::cout << "\n=== Camera Initialization ===" << std::endl;
     
@@ -840,7 +838,6 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             cv::Mat testFrame;
             if (cap.read(testFrame) && !testFrame.empty()) {
                 std::cout << "✓ Arducam 64MP via GStreamer: SUCCESS (1920x1080 @ 45fps)" << std::endl;
-                usingRealCamera = true;
             } else {
                 std::cerr << "✗ GStreamer opened but cannot read frames" << std::endl;
                 cap.release();
@@ -854,7 +851,7 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     }
     
     // Try method 2: V4L2 camera (index 0)
-    if (!usingRealCamera) {
+    if (!cap.isOpened()) {
         std::cout << "Attempting default camera (index 0)..." << std::endl;
         try {
             cap.open(0);
@@ -862,7 +859,6 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 cv::Mat testFrame;
                 if (cap.read(testFrame) && !testFrame.empty()) {
                     std::cout << "✓ Default camera: SUCCESS" << std::endl;
-                    usingRealCamera = true;
                 } else {
                     std::cerr << "✗ Default camera opened but cannot read frames" << std::endl;
                     cap.release();
@@ -876,74 +872,20 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
     }
     
-    // Final fallback: Synthetic test mode
-    if (!usingRealCamera) {
-        std::cout << "\n╔════════════════════════════════════════╗" << std::endl;
-        std::cout << "║   RUNNING IN TEST MODE                 ║" << std::endl;
-        std::cout << "║   Generating synthetic frames @ 45fps  ║" << std::endl;
-        std::cout << "║   With moving target for testing       ║" << std::endl;
-        std::cout << "╚════════════════════════════════════════╝" << std::endl;
+    if (!cap.isOpened()) {
+        std::cerr << "FATAL: No camera available. Exiting camera thread." << std::endl;
+        run = false;
+        return;
     }
-    std::cout << "\n" << std::endl;
-
-    int frameCount = 0;
+    std::cout << std::endl;
     
     while(run)
     {
         FrameData f;
 
-        if (usingRealCamera) {
-            if (!cap.read(f.frame)) {
-                failureCount++;
-                // If we get 50 consecutive read failures, switch to test mode
-                if (failureCount > 50) {
-                    std::cerr << "WARNING: Camera read failing consistently. Switching to TEST MODE (synthetic frames)" << std::endl;
-                    usingRealCamera = false;
-                    cap.release();
-                    failureCount = 0;
-                } else {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    continue;
-                }
-            } else {
-                failureCount = 0;  // Reset failure counter on successful read
-            }
-        }
-        
-        if (!usingRealCamera) {
-            // Generate synthetic test frame with moving targets
-            f.frame = cv::Mat(1080, 1920, CV_8UC3, cv::Scalar(40, 45, 50));
-            
-            // Add gradient background for variety
-            for (int y = 0; y < 1080; y += 20) {
-                cv::line(f.frame, cv::Point(0, y), cv::Point(1920, y), 
-                        cv::Scalar(50 + y/30, 40 + y/40, 55), 1);
-            }
-            
-            // Create multiple moving objects
-            // Object 1: Large circular target
-            int obj1X = 960 + (int)(300 * sin(frameCount * 0.03));
-            int obj1Y = 540 + (int)(200 * cos(frameCount * 0.02));
-            cv::circle(f.frame, cv::Point(obj1X, obj1Y), 40, cv::Scalar(0, 0, 255), -1);
-            cv::circle(f.frame, cv::Point(obj1X, obj1Y), 45, cv::Scalar(255, 255, 255), 3);
-            
-            // Object 2: Smaller fast-moving target
-            int obj2X = 600 + (int)(250 * cos(frameCount * 0.05));
-            int obj2Y = 400 + (int)(180 * sin(frameCount * 0.04));
-            cv::rectangle(f.frame, cv::Point(obj2X - 25, obj2Y - 25), 
-                         cv::Point(obj2X + 25, obj2Y + 25), cv::Scalar(255, 128, 0), -1);
-            
-            // Object 3: Another moving circle
-            int obj3X = 1200 + (int)(200 * sin(frameCount * 0.025));
-            int obj3Y = 700 + (int)(150 * cos(frameCount * 0.035));
-            cv::circle(f.frame, cv::Point(obj3X, obj3Y), 30, cv::Scalar(255, 255, 0), -1);
-            
-            // Test mode label
-            cv::putText(f.frame, "TEST MODE - Synthetic Frames", cv::Point(50, 50),
-                       cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 255), 2);
-            
-            frameCount++;
-            std::this_thread::sleep_for(std::chrono::milliseconds(22)); // ~45 fps
+        if (!cap.read(f.frame)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
         }
 
         f.timestamp=
@@ -954,9 +896,7 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         queue.push(f);
     }
     
-    if (usingRealCamera) {
-        cap.release();
-    }
+    cap.release();
 }
 
 /* =============== TRACKING THREAD =============== */

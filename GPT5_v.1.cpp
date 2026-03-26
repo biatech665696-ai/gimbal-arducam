@@ -954,8 +954,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === DETECTION (каждый кадр, без settle) ===
         Detection d = detector.detect(gray, 0, 0);
 
-        // Noise gate: >10 объектов после фильтрации = шум MOG2
-        if ((int)d.all_boxes.size() > 10) {
+        // Noise gate: >3 объектов после фильтрации = шум MOG2
+        if ((int)d.all_boxes.size() > 3) {
             d.valid = false;
             d.all_boxes.clear();
             detector.resetConsecutive();
@@ -977,6 +977,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;
             double ey = d.y - cy;
+
+            // Clamp max error: >300px from center = likely false detection
+            const double MAX_ERR = 300.0;
+            if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
+            if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
             double norm_ex = ex / cx;
             double norm_ey = ey / cx;

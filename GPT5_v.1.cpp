@@ -398,6 +398,7 @@ public:
         , framesSinceMotion_(999)
         , prevRawFG_(0)
         , cooldownFrames_(0)
+        , postCooldownLR_(0)
     {
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
@@ -416,6 +417,7 @@ public:
         prevGray_ = cv::Mat();
         prevRawFG_ = 0;
         cooldownFrames_ = 0;
+        postCooldownLR_ = 0;
     }
     void resetCounters()
     {
@@ -497,6 +499,10 @@ public:
             framesSinceMotion_++;
         } else {
             lr = 0.004;             // Stable: slow learning
+            if (postCooldownLR_ > 0) {
+                lr = 0.08;           // Post-cooldown: absorb residuals faster
+                postCooldownLR_--;
+            }
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -516,7 +522,7 @@ public:
         if (rawFG > 2000) {
             lastRawContours_ = 0;
             consecutiveDetections_ = 0;
-            cooldownFrames_ = 5;  // require 5 clean frames after noise
+            cooldownFrames_ = 3;  // require 3 clean frames after noise (adaptive exit)
             return d;
         }
 
@@ -527,12 +533,17 @@ public:
             cooldownFrames_ = std::max(cooldownFrames_, 2);
         }
 
-        // === COOLDOWN ===
+        // === COOLDOWN (adaptive: exit early when FG settles) ===
         if (cooldownFrames_ > 0) {
-            cooldownFrames_--;
-            consecutiveDetections_ = 0;
-            lastRawContours_ = (int)0;
-            return d;
+            if (rawFG < 300 && flowMag < 0.5f) {
+                cooldownFrames_ = 0;  // FG settled, end cooldown early
+                postCooldownLR_ = 3;  // boost LR to absorb residuals
+            } else {
+                cooldownFrames_--;
+                consecutiveDetections_ = 0;
+                lastRawContours_ = (int)0;
+                return d;
+            }
         }
 
         // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
@@ -650,6 +661,7 @@ private:
     int framesSinceMotion_;
     int prevRawFG_;
     int cooldownFrames_;  // frames since last FG gate/noise gate
+    int postCooldownLR_;  // frames of elevated LR after cooldown ends
 };
 
 /* =============== ROI COMPUTATION =============== */
@@ -992,6 +1004,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === ПРЯМОЕ НАВЕДЕНИЕ ===
         // Объект на ex пикселей от центра = ex * (FOV/width) градусов от серво
         // Коэффициент 1.5x компенсирует задержку камера→детект→серво (~50-100мс)
+        // === VELOCITY ESTIMATION (for lead correction) ===
+        static std::deque<std::tuple<double, double, double>> velHistory; // time, x, y
+        if (modeJustChanged) velHistory.clear();
+        if (d.valid) {
+            double now = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            velHistory.push_back({now, d.x, d.y});
+            while (velHistory.size() > 8) velHistory.pop_front();
+        }
+
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
         const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;  // ~0.03938 deg/px (1.05x overcorrect)
@@ -999,6 +1021,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (d.valid && currentTrackingEnabled) {
             double ex = d.x - cx;
             double ey = d.y - cy;
+
+            // Lead correction: predict where object will be after detection delay
+            if (velHistory.size() >= 2) {
+                auto& [t0, x0, y0] = velHistory[velHistory.size() - 2];
+                auto& [t1, x1, y1] = velHistory.back();
+                double dt = t1 - t0;
+                if (dt > 0.03 && dt < 1.0) {
+                    double vx = (x1 - x0) / dt;
+                    double vy = (y1 - y0) / dt;
+                    const double LEAD_TIME = 0.10; // predict 100ms ahead
+                    ex += vx * LEAD_TIME;
+                    ey += vy * LEAD_TIME;
+                }
+            }
 
             // Clamp max error: >300px from center = likely false detection
             const double MAX_ERR = 300.0;

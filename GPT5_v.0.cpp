@@ -402,6 +402,10 @@ public:
         boxHistory_.clear();
     }
 
+    // Лёгкий сброс только счётчика последовательных детекций.
+    // Вызывается при settle start, чтобы шум не накапливался.
+    void resetConsecutive() { consecutiveDetections_ = 0; }
+
     Detection detect(cv::Mat &roi, int ox, int oy, double learningRate = 0.005)
     {
         const int MIN_DETECTIONS = 3;
@@ -448,7 +452,7 @@ public:
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
             if (!atEdge &&
-                area >= 1.0 && area <= 250.0 &&
+                area >= 5.0 && area <= 250.0 &&
                 solidity > 0.42 &&
                 bbox.width >= 1 && bbox.height >= 1 &&
                 bbox.width <= 60 && bbox.height <= 60 &&
@@ -892,7 +896,6 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
 void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 {
-    AngleKalman kalman;
     MotionDetector detector;
 
     double cx = CX;
@@ -930,17 +933,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static int framesSinceFixedMode = 0;
         // learningRate for BGS: 1.0 on mode change (instant reset), 0.05 for
         // first 60 frames (fast warm-up at new static position), 0.01 normal
-        double bgsLearningRate = 0.01;
+        double bgsLearningRate = currentTrackingEnabled ? 0.04 : 0.01;
         // Frame-based settle: 9 кадров с LR=0.7 после каждого шага серво.
         // Быстро учит новый фон за 9 кадров (~200ms при 45fps), потом LR=0.01.
         // Нет postSettle с LR=0.3 — объект не поглощается в фон.
         bool cameraSettling = (servoSettleFrames > 0);
         if (cameraSettling) {
-            // LR=0.05: мягко адаптировать BGS к новой позиции камеры.
-            // LR=0 = BGS не учится → 30+ кадров слепоты после каждого хода.
-            // LR=0.7 = BGS поглощает объект в фон.
-            // LR=0.05 = компромисс: за 4 кадра адаптирует фон, объект не поглощён.
-            bgsLearningRate = 0.05;
+            // LR=0.15: быстро адаптировать BGS к сдвигу камеры.
+            // LR=0 → 30+ кадров слепоты. LR=0.7 → поглощает объект.
+            // LR=0.15 за 3 кадра: old=0.85^3=61% → 39% новый фон. Достаточно.
+            bgsLearningRate = 0.15;
             servoSettleFrames--;
         }
         bool doReinitNow = needsBGSReinit;
@@ -952,8 +954,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 std::cout << ">>> FIXED MODE ACTIVATED <<<" << std::endl;
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
                 setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
-                // Сброс Калмана при входе в FIXED: убирает накопленные ошибки
-                kalman = AngleKalman();
             } else {
                 framesSinceFixedMode++;
                 bgsLearningRate = (framesSinceFixedMode <= 30) ? 0.1 : 0.01;
@@ -990,8 +990,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             d.all_boxes.clear();
         }
 
-        // НЕ подавляем детекцию при settle — noise gate (>10 объектов)
-        // и edge rejection защищают от помех. Подавление давало ~2с слепоты.
+        // Settle suppression: после движения серво, MOG2 видит сдвиг как движение.
+        // Без подавления → ложные детекции → ещё движение → положительная ОС.
+        // Noise gate (>10) не ловит 1-9 ложных объектов. Подавление обязательно.
+        if (cameraSettling) {
+            d.valid = false;
+            d.all_boxes.clear();
+        }
 
         // ROI для визуализации (не для детекции!)
         if (d.valid) {
@@ -1089,7 +1094,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double moveAmount = std::abs(yawDeg - lastSentYawDeg)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
                 if (moveAmount > 2.0) {
-                    servoSettleFrames = 4;  // 4 кадра ~200ms при 20fps
+                    servoSettleFrames = 3;  // 3 кадра ~150ms при 20fps
+                    detector.resetConsecutive();  // сброс шумовых накоплений
                 }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));

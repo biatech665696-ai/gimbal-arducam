@@ -373,20 +373,20 @@ public:
     void notifyAll() { cv.notify_all(); }
 };
 
-/* =============== WARPED BACKGROUND MODEL =============== */
-// Своя модель фона с компенсацией движения камеры:
-// 1. Sparse OF (LK) → affine → warp bgModel к текущему кадру
-// 2. |warped_bg - current| > threshold → foreground mask
-// 3. Обновление bgModel: background пиксели учатся, foreground — нет
-// Преимущества: чувствительность MOG2 (фон за десятки кадров) +
-//   компенсация камеры (no settle, no blind gap) +
-//   простота (один Gaussian вместо Mixture)
+/* =============== MOG2 + OPTICAL FLOW HYBRID =============== */
+// MOG2 для per-pixel адаптивного детектирования переднего плана
+// (проверенная детекция маленьких объектов) + sparse LK optical flow
+// для определения движения камеры → адаптивный learning rate MOG2:
+//   - камера движется (flowMag > 2px): LR=0.5 → поглощение нового фона за 1-2 кадра
+//   - переходный период (3 кадра после остановки): LR=0.2
+//   - стабильно: LR=0.005 → медленное обучение, объект остаётся foreground
+// Устраняет 5-кадровый слепой зазор v0 при сохранении превосходной детекции MOG2.
 
 class MotionDetector
 {
 public:
     MotionDetector()
-        : clahe_(cv::createCLAHE(2.0, cv::Size(8, 8)))
+        : mog2_(cv::createBackgroundSubtractorMOG2(500, 16.0, false))
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
@@ -395,30 +395,39 @@ public:
         , lastFGPixels_(0)
         , lastRawContours_(0)
         , lastGlobalFlow_(0, 0)
-        , fgGateCooldown_(0)
-    {}
+        , framesSinceMotion_(999)
+        , prevRawFG_(0)
+    {
+        mog2_->setNMixtures(5);
+        mog2_->setComplexityReductionThreshold(0.05);
+        mog2_->setBackgroundRatio(0.9);
+    }
 
     int lastFGPixels() const { return lastFGPixels_; }
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
-    void reinitBGS() { prevGray_ = cv::Mat(); bgModel_ = cv::Mat(); }
+    void reinitBGS() {
+        mog2_ = cv::createBackgroundSubtractorMOG2(500, 16.0, false);
+        mog2_->setNMixtures(5);
+        mog2_->setComplexityReductionThreshold(0.05);
+        mog2_->setBackgroundRatio(0.9);
+        prevGray_ = cv::Mat();
+        prevRawFG_ = 0;
+    }
     void resetCounters()
     {
         consecutiveDetections_ = 0;
         consecutiveMisses_ = 0;
         lastValidCenter_ = cv::Point2f(-1, -1);
-        prevGray_ = cv::Mat();
-        bgModel_ = cv::Mat();
+        reinitBGS();
     }
     void resetConsecutive() { consecutiveDetections_ = 0; }
 
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
-        const int MIN_DETECTIONS = 3;
+        const int MIN_DETECTIONS = 2;
         const int MAX_MISSES = 60;
-        const float FG_THRESHOLD = 15.0f;  // 25 убивало маленькие объекты; CLAHE убран → шум ниже
-        const float BG_ALPHA = 0.97f;      // 97% старый bg, 3% новый кадр (~1.5s tau)
 
         Detection d;
         d.valid = false;
@@ -431,108 +440,82 @@ public:
 
         cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0.8);
 
-        cv::Mat curFloat;
-        gray.convertTo(curFloat, CV_32F);
-
-        // Первый кадр — инициализируем bg model
-        if (bgModel_.empty()) {
-            bgModel_ = curFloat.clone();
-            prevGray_ = gray.clone();
-            lastFGPixels_ = 0;
-            lastRawContours_ = 0;
-            return d;
-        }
-
         // === CAMERA MOTION ESTIMATION (sparse LK + affine) ===
-        std::vector<cv::Point2f> prevPts;
-        cv::goodFeaturesToTrack(prevGray_, prevPts, 200, 0.01, 10);
         lastGlobalFlow_ = cv::Point2f(0, 0);
 
-        cv::Mat affine;
-        if (prevPts.size() >= 4) {
-            std::vector<cv::Point2f> currPts;
-            std::vector<uchar> status;
-            std::vector<float> err;
-            cv::calcOpticalFlowPyrLK(prevGray_, gray, prevPts, currPts, status, err,
-                cv::Size(21, 21), 3);
+        if (!prevGray_.empty() && prevGray_.size() == gray.size()) {
+            std::vector<cv::Point2f> prevPts;
+            cv::goodFeaturesToTrack(prevGray_, prevPts, 100, 0.01, 10);
 
-            std::vector<cv::Point2f> goodPrev, goodCurr;
-            for (size_t i = 0; i < status.size(); i++) {
-                if (status[i] && err[i] < 12.0f) {
-                    goodPrev.push_back(prevPts[i]);
-                    goodCurr.push_back(currPts[i]);
+            if (prevPts.size() >= 4) {
+                std::vector<cv::Point2f> currPts;
+                std::vector<uchar> status;
+                std::vector<float> err;
+                cv::calcOpticalFlowPyrLK(prevGray_, gray, prevPts, currPts, status, err,
+                    cv::Size(21, 21), 3);
+
+                std::vector<cv::Point2f> goodPrev, goodCurr;
+                for (size_t i = 0; i < status.size(); i++) {
+                    if (status[i] && err[i] < 12.0f) {
+                        goodPrev.push_back(prevPts[i]);
+                        goodCurr.push_back(currPts[i]);
+                    }
                 }
-            }
 
-            if (goodPrev.size() >= 4) {
-                cv::Mat inlierMask;
-                affine = cv::estimateAffinePartial2D(
-                    goodPrev, goodCurr, inlierMask, cv::RANSAC, 3.0);
-                if (!affine.empty()) {
-                    lastGlobalFlow_ = cv::Point2f(
-                        (float)affine.at<double>(0, 2),
-                        (float)affine.at<double>(1, 2));
+                if (goodPrev.size() >= 4) {
+                    cv::Mat inlierMask;
+                    cv::Mat affine = cv::estimateAffinePartial2D(
+                        goodPrev, goodCurr, inlierMask, cv::RANSAC, 3.0);
+                    if (!affine.empty()) {
+                        lastGlobalFlow_ = cv::Point2f(
+                            (float)affine.at<double>(0, 2),
+                            (float)affine.at<double>(1, 2));
+                    }
                 }
             }
         }
 
-        // Update prevGray for next frame's LK
         prevGray_ = gray.clone();
 
-        // === CAMERA MOTION: just let warp handle it ===
-        // Removing full bg reset that was destroying accumulated model.
-        // The affine warp already aligns bgModel to current frame.
-        // FG gate handles residual noise from imperfect warp.
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === WARP BACKGROUND MODEL to current frame alignment ===
-        cv::Mat bgWarped;
-        if (!affine.empty()) {
-            cv::warpAffine(bgModel_, bgWarped, affine, gray.size(),
-                cv::INTER_LINEAR, cv::BORDER_REFLECT);
+        // === ADAPTIVE MOG2 LEARNING RATE ===
+        // Camera moving → high LR: absorb new background in 1-2 frames
+        // Auto-exposure spike (high fg, no flow) → medium LR to absorb brightness shift
+        // Camera stable → low LR: object stays foreground for detection
+        double lr;
+        if (flowMag > 2.0f) {
+            lr = 0.5;               // Camera motion: fast absorb new bg
+            framesSinceMotion_ = 0;
+        } else if (prevRawFG_ > 5000 && flowMag < 1.0f) {
+            lr = 0.3;               // Auto-exposure spike: absorb brightness change
+        } else if (framesSinceMotion_ < 3) {
+            lr = 0.2;               // Post-motion transition
+            framesSinceMotion_++;
         } else {
-            bgWarped = bgModel_.clone();
+            lr = 0.008;             // Stable: slow learning
         }
 
-        // === FOREGROUND DETECTION: |warped_bg - current| > threshold ===
-        // Normalize global brightness to compensate for auto-exposure drift
-        float bgMean = (float)cv::mean(bgWarped)[0];
-        float curMean = (float)cv::mean(curFloat)[0];
-        cv::Mat bgCorrected;
-        bgWarped.convertTo(bgCorrected, CV_32F, 1.0, curMean - bgMean);
-
-        cv::Mat diff;
-        cv::absdiff(bgCorrected, curFloat, diff);
-        cv::Mat diffU8;
-        diff.convertTo(diffU8, CV_8U);
+        // === MOG2 FOREGROUND DETECTION ===
         cv::Mat fgMask;
-        cv::threshold(diffU8, fgMask, (int)FG_THRESHOLD, 255, cv::THRESH_BINARY);
+        mog2_->apply(gray, fgMask, lr);
 
-        // === UPDATE BACKGROUND MODEL ===
-        // Learn everywhere at same rate. Moving objects pass through each pixel
-        // in 2-5 frames — too fast to absorb at alpha=0.97 (need ~30 frames).
-        // This also fixes the initial deadlock: auto-exposure shift made ALL pixels
-        // "foreground", and protected fg pixels never learned — eternal fg.
-        cv::addWeighted(bgWarped, BG_ALPHA, curFloat, 1.0 - BG_ALPHA, 0.0, bgModel_);
+        // Remove shadows (MOG2 marks as 127 when detectShadows=true)
+        cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
+
+        int rawFG = cv::countNonZero(fgMask);
+        lastFGPixels_ = rawFG;
+        prevRawFG_ = rawFG;
 
         // === FG PIXEL GATE ===
-        // Skip frame if too much fg (servo moved → imperfect warp residual)
-        // but do NOT reset consecutive: real object persists across skipped frames
-        lastFGPixels_ = cv::countNonZero(fgMask);
-        if (lastFGPixels_ > 500) {
-            lastRawContours_ = 0;
-            fgGateCooldown_ = 3;  // 3 frames cooldown
-            return d;
-        }
-        if (fgGateCooldown_ > 0) {
-            fgGateCooldown_--;
+        // Skip detection but don't reset consecutive — real object persists
+        if (rawFG > 2000) {
             lastRawContours_ = 0;
             return d;
         }
 
-        // Morphology: OPEN(2x2) kills single-pixel noise, CLOSE(3x3) connects nearby
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel2_);
+        // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
@@ -557,7 +540,7 @@ public:
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
             if (!atEdge &&
-                area >= 6.0 && area <= 1500.0 &&
+                area >= 3.0 && area <= 1500.0 &&
                 solidity > 0.2 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
                 bbox.width <= 100 && bbox.height <= 100 &&
@@ -634,10 +617,9 @@ public:
     }
 
 private:
-    cv::Ptr<cv::CLAHE> clahe_;
+    cv::Ptr<cv::BackgroundSubtractorMOG2> mog2_;
     cv::Mat kernel2_;
     cv::Mat kernel3_;
-    cv::Mat bgModel_;     // float32, running average background with motion compensation
     cv::Mat prevGray_;    // uint8, for LK tracking
     cv::Point2f lastValidCenter_;
     int consecutiveDetections_;
@@ -645,7 +627,8 @@ private:
     int lastFGPixels_;
     int lastRawContours_;
     cv::Point2f lastGlobalFlow_;
-    int fgGateCooldown_;
+    int framesSinceMotion_;
+    int prevRawFG_;
 };
 
 /* =============== ROI COMPUTATION =============== */

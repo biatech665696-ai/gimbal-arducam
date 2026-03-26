@@ -1215,18 +1215,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === TRAJECTORY цента кадра (куда серво целится) — cyan ===
         static std::deque<cv::Point2f> aimHistory;
-        {
-            // Центр кадра в пикселях = куда смотрит камера сейчас
-            // После predictFuture s.theta/s.phi показывают остаточную ошибку.
-            // Позиция куда серво нацелилось = центр минус ошибка:
-            double aimX = cx - s.theta * F;
-            double aimY = cy - s.phi   * F;
-            aimHistory.push_back(cv::Point2f((float)aimX, (float)aimY));
+        if (d.valid) {
+            // Центр кадра в пикселях минус остаточная ошибка Kalman после predictFuture
+            // Это куда серво фактически нацелилось на последнем шаге
+            aimHistory.push_back(cv::Point2f((float)(cx + s.theta * F),
+                                             (float)(cy + s.phi   * F)));
             if (aimHistory.size() > 30) aimHistory.pop_front();
         }
         for (int i = 0; i < (int)aimHistory.size(); i++) {
             float t = (float)i / std::max((int)aimHistory.size() - 1, 1);
-            // зелёный→белый
             cv::Scalar col(200 * t, 255, 200 * t);
             if (i > 0)
                 cv::line(display, aimHistory[i-1], aimHistory[i], col, 2);

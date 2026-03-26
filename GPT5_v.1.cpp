@@ -373,13 +373,14 @@ public:
     void notifyAll() { cv.notify_all(); }
 };
 
-/* =============== MOTION-COMPENSATED FRAME DIFFERENCING =============== */
-// Детекция независимо движущихся объектов:
-// 1. Sparse OF (Lucas-Kanade) для оценки глобального движения камеры
-// 2. Affine warp предыдущего кадра для компенсации движения камеры
-// 3. absdiff между выравненным предыдущим и текущим кадром → маска движения
-// 4. Контуры + фильтрация → объект
-// Преимущества: БЫСТРО (sparse OF + absdiff), НЕ нужен settle, работает КАЖДЫЙ кадр.
+/* =============== WARPED BACKGROUND MODEL =============== */
+// Своя модель фона с компенсацией движения камеры:
+// 1. Sparse OF (LK) → affine → warp bgModel к текущему кадру
+// 2. |warped_bg - current| > threshold → foreground mask
+// 3. Обновление bgModel: background пиксели учатся, foreground — нет
+// Преимущества: чувствительность MOG2 (фон за десятки кадров) +
+//   компенсация камеры (no settle, no blind gap) +
+//   простота (один Gaussian вместо Mixture)
 
 class MotionDetector
 {
@@ -387,7 +388,6 @@ public:
     MotionDetector()
         : clahe_(cv::createCLAHE(2.0, cv::Size(8, 8)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
-        , kernel5_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)))
         , lastValidCenter_(-1, -1)
         , consecutiveDetections_(0)
         , consecutiveMisses_(0)
@@ -400,14 +400,14 @@ public:
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
-    void reinitBGS() { prevGray_ = cv::Mat(); prevPoints_.clear(); }
+    void reinitBGS() { prevGray_ = cv::Mat(); bgModel_ = cv::Mat(); }
     void resetCounters()
     {
         consecutiveDetections_ = 0;
         consecutiveMisses_ = 0;
         lastValidCenter_ = cv::Point2f(-1, -1);
         prevGray_ = cv::Mat();
-        prevPoints_.clear();
+        bgModel_ = cv::Mat();
     }
     void resetConsecutive() { consecutiveDetections_ = 0; }
 
@@ -415,7 +415,9 @@ public:
     {
         const int MIN_DETECTIONS = 2;
         const int MAX_MISSES = 60;
-        const int DIFF_THRESHOLD = 25;  // абсолютная разница яркости для "изменение"
+        const float FG_THRESHOLD = 25.0f;  // порог разницы от bg model
+        const float BG_ALPHA = 0.97f;      // 97% старый bg, 3% новый кадр (~1.5s tau)
+        const float CAMERA_RESET_PX = 8.0f; // при сдвиге > 8px — reset bg model
 
         Detection d;
         d.valid = false;
@@ -429,31 +431,31 @@ public:
         cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.0);
         clahe_->apply(gray, gray);
 
-        // Первый кадр — сохраняем и выходим
-        if (prevGray_.empty()) {
+        cv::Mat curFloat;
+        gray.convertTo(curFloat, CV_32F);
+
+        // Первый кадр — инициализируем bg model
+        if (bgModel_.empty()) {
+            bgModel_ = curFloat.clone();
             prevGray_ = gray.clone();
             lastFGPixels_ = 0;
             lastRawContours_ = 0;
             return d;
         }
 
-        // === ШАГОТКОМПЕНСАЦИЯ ДВИЖЕНИЯ КАМЕРЫ ===
-        // 1. Находим хорошие точки в предыдущем кадре
+        // === CAMERA MOTION ESTIMATION (sparse LK + affine) ===
         std::vector<cv::Point2f> prevPts;
         cv::goodFeaturesToTrack(prevGray_, prevPts, 200, 0.01, 10);
-
-        cv::Mat fgMask;
         lastGlobalFlow_ = cv::Point2f(0, 0);
 
+        cv::Mat affine;
         if (prevPts.size() >= 4) {
-            // 2. Трекаем точки sparse OF (Lucas-Kanade) — БЫСТРО
             std::vector<cv::Point2f> currPts;
             std::vector<uchar> status;
             std::vector<float> err;
             cv::calcOpticalFlowPyrLK(prevGray_, gray, prevPts, currPts, status, err,
                 cv::Size(21, 21), 3);
 
-            // Отбираем хорошие совпадения
             std::vector<cv::Point2f> goodPrev, goodCurr;
             for (size_t i = 0; i < status.size(); i++) {
                 if (status[i] && err[i] < 12.0f) {
@@ -463,64 +465,68 @@ public:
             }
 
             if (goodPrev.size() >= 4) {
-                // 3. Оценка affine трансформации (движение камеры)
                 cv::Mat inlierMask;
-                cv::Mat affine = cv::estimateAffinePartial2D(
-                    goodPrev, goodCurr, inlierMask,
-                    cv::RANSAC, 3.0);
-
+                affine = cv::estimateAffinePartial2D(
+                    goodPrev, goodCurr, inlierMask, cv::RANSAC, 3.0);
                 if (!affine.empty()) {
-                    // Извлекаем глобальный сдвиг для диагностики
                     lastGlobalFlow_ = cv::Point2f(
                         (float)affine.at<double>(0, 2),
                         (float)affine.at<double>(1, 2));
-
-                    // 4. Warp предыдущий кадр к текущему
-                    cv::Mat warped;
-                    cv::warpAffine(prevGray_, warped, affine, gray.size(),
-                        cv::INTER_LINEAR, cv::BORDER_REFLECT);
-
-                    // 5. Абсолютная разница → маска движения
-                    cv::Mat diff;
-                    cv::absdiff(warped, gray, diff);
-                    cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
-                } else {
-                    // Affine не вычислен — просто absdiff без компенсации
-                    cv::Mat diff;
-                    cv::absdiff(prevGray_, gray, diff);
-                    cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
                 }
-            } else {
-                // Мало совпадений — absdiff без компенсации
-                cv::Mat diff;
-                cv::absdiff(prevGray_, gray, diff);
-                cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
             }
-        } else {
-            // Мало точек — absdiff без компенсации
-            cv::Mat diff;
-            cv::absdiff(prevGray_, gray, diff);
-            cv::threshold(diff, fgMask, DIFF_THRESHOLD, 255, cv::THRESH_BINARY);
         }
 
-        // Сохраняем для следующего кадра
+        // Update prevGray for next frame's LK
         prevGray_ = gray.clone();
 
-        // === SKIP DETECTION WHEN CAMERA JUST MOVED ===
-        // После хода серво компенсация неидеальна → fg утечка → каскад.
-        // Пропускаем 1 кадр (НЕ сбрасываем prevGray — он уже обновлён).
+        // === CAMERA MOTION GUARD ===
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
-        if (flowMag > 3.0f) {
-            lastFGPixels_ = cv::countNonZero(fgMask);
+        if (flowMag > CAMERA_RESET_PX) {
+            // Large motion → bg model is too misaligned, reset it
+            bgModel_ = curFloat.clone();
+            lastFGPixels_ = 0;
             lastRawContours_ = 0;
-            // Не трогаем consecutive счётчики — просто пропускаем кадр
+            consecutiveDetections_ = 0;
             return d;
         }
 
-        // Морфология
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN,  kernel5_);  // убить шум
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);  // соединить
+        // === WARP BACKGROUND MODEL to current frame alignment ===
+        cv::Mat bgWarped;
+        if (!affine.empty()) {
+            cv::warpAffine(bgModel_, bgWarped, affine, gray.size(),
+                cv::INTER_LINEAR, cv::BORDER_REFLECT);
+        } else {
+            bgWarped = bgModel_.clone();
+        }
+
+        // === FOREGROUND DETECTION: |warped_bg - current| > threshold ===
+        cv::Mat diff;
+        cv::absdiff(bgWarped, curFloat, diff);
+        cv::Mat diffU8;
+        diff.convertTo(diffU8, CV_8U);
+        cv::Mat fgMask;
+        cv::threshold(diffU8, fgMask, (int)FG_THRESHOLD, 255, cv::THRESH_BINARY);
+
+        // === UPDATE BACKGROUND MODEL ===
+        // Where NOT foreground: blend bg toward current (learn background)
+        // Where foreground: keep old bg (don't absorb moving object)
+        cv::Mat newBg;
+        cv::addWeighted(bgWarped, BG_ALPHA, curFloat, 1.0 - BG_ALPHA, 0.0, newBg);
+        bgWarped.copyTo(newBg, fgMask);  // fg pixels: keep old bg
+        bgModel_ = newBg;
+
+        // === FG PIXEL GATE (safety) ===
+        lastFGPixels_ = cv::countNonZero(fgMask);
+        if (lastFGPixels_ > 500) {
+            // Too much foreground = imperfect compensation or lighting change
+            lastRawContours_ = 0;
+            consecutiveDetections_ = 0;
+            return d;
+        }
+
+        // Morphology: only CLOSE to connect nearby pixels, NO OPEN (preserve small objects)
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
@@ -544,8 +550,8 @@ public:
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
             if (!atEdge &&
-                area >= 5.0 && area <= 1500.0 &&
-                solidity > 0.25 &&
+                area >= 3.0 && area <= 1500.0 &&
+                solidity > 0.2 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
                 bbox.width <= 100 && bbox.height <= 100 &&
                 aspectRatio > 0.12 && aspectRatio < 8.0) {
@@ -623,9 +629,8 @@ public:
 private:
     cv::Ptr<cv::CLAHE> clahe_;
     cv::Mat kernel3_;
-    cv::Mat kernel5_;
-    cv::Mat prevGray_;
-    std::vector<cv::Point2f> prevPoints_;
+    cv::Mat bgModel_;     // float32, running average background with motion compensation
+    cv::Mat prevGray_;    // uint8, for LK tracking
     cv::Point2f lastValidCenter_;
     int consecutiveDetections_;
     int consecutiveMisses_;

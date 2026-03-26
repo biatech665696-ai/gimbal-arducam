@@ -1419,14 +1419,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 128, 0), 2);
         }
         
-        // Keyboard controls overlay
-        cv::rectangle(display, cv::Point(5, 130), cv::Point(450, 190), 
-                     cv::Scalar(0, 0, 0), -1);
-        cv::rectangle(display, cv::Point(5, 130), cv::Point(450, 190), 
-                     cv::Scalar(0, 255, 255), 2);
-        cv::putText(display, "Q/ESC: Quit  F: Toggle mode", cv::Point(10, 170), 
-                   cv::FONT_HERSHEY_SIMPLEX, 0.8, cv::Scalar(0, 255, 255), 2);
-        
         // Update display frame
         {
             std::lock_guard<std::mutex> lock(displayMutex);

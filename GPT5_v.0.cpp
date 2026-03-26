@@ -969,11 +969,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // (сдвиг ROI между кадрами делает per-pixel модель фона невалидной)
         Detection d = detector.detect(gray, 0, 0, bgsLearningRate);
         
-        // НЕ подавляем детекцию при settling:
-        // старый код (d.valid=false на 9 кадров) создавал слепую зону,
-        // за которую Kalman терял позицию → oscillation.
-        // Теперь BGS с высоким LR (0.7) быстро учит фон,
-        // а детекция работает непрерывно.
+        // Noise gate: >10 объектов = шум от сдвига камеры, не реальные цели.
+        // MOG2 при сдвиге видит ВСЕ пиксели как "движение" → 70-100+ контуров.
+        if ((int)d.all_boxes.size() > 10) {
+            d.valid = false;
+            d.all_boxes.clear();
+        }
+
+        // Подавляем детекцию при settle (камера дрожит → BGS шумит).
+        // Короткое окно (4 кадра ~200ms) — Kalman ДЕРЖИТ позицию (без decay),
+        // серво не drift'ит к центру.
+        if (cameraSettling) {
+            d.valid = false;
+            d.all_boxes.clear();
+        }
 
         // ROI для визуализации (не для детекции!)
         if (d.valid) {
@@ -1090,9 +1099,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                                   + std::abs(pitchDeg - lastSentPitchDeg);
                 if (moveAmount > 2.0) {
                     servoSettleFrames = 4;  // 4 кадра ~200ms при 20fps
-                    if (moveAmount > 3.0) {
-                        needsBGSReinit = true;  // полный reinit только при большом прыжке
-                    }
                 }
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));

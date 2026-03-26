@@ -386,7 +386,13 @@ public:
         , lastValidCenter_(-1, -1)
         , consecutiveDetections_(0)
         , consecutiveMisses_(0)
+        , lastFGPixels_(0)
+        , lastRawContours_(0)
     {}
+
+    // Диагностика: сколько пикселей foreground и сырых контуров
+    int lastFGPixels() const { return lastFGPixels_; }
+    int lastRawContours() const { return lastRawContours_; }
 
     void reinitBGS()
     {
@@ -436,6 +442,10 @@ public:
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
+        // Диагностика
+        lastFGPixels_ = cv::countNonZero(fgMask);
+        lastRawContours_ = (int)contours.size();
+
         std::vector<std::pair<double, int>> validObjects;
 
         for (size_t i = 0; i < contours.size(); i++) {
@@ -452,7 +462,7 @@ public:
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
             if (!atEdge &&
-                area >= 5.0 && area <= 250.0 &&
+                area >= 3.0 && area <= 250.0 &&
                 solidity > 0.42 &&
                 bbox.width >= 1 && bbox.height >= 1 &&
                 bbox.width <= 60 && bbox.height <= 60 &&
@@ -572,6 +582,8 @@ private:
     int consecutiveDetections_;
     int consecutiveMisses_;
     std::deque<std::vector<cv::Rect>> boxHistory_;
+    int lastFGPixels_;
+    int lastRawContours_;
 };
 
 /* =============== ROI COMPUTATION =============== */
@@ -933,16 +945,31 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static int framesSinceFixedMode = 0;
         // learningRate for BGS: 1.0 on mode change (instant reset), 0.05 for
         // first 60 frames (fast warm-up at new static position), 0.01 normal
-        double bgsLearningRate = currentTrackingEnabled ? 0.04 : 0.01;
+        double bgsLearningRate = 0.01;
+        // TRACKING warmup: аналог FIXED warmup (LR=1.0 + 30 кадров LR=0.1).
+        // Без этого MOG2 с пустой моделью на LR=0.01 — всё foreground → noise gate убивает →
+        // через 5с объект в фоне → вечная слепота.
+        static int framesSinceTrackingMode = -1;  // -1 = никогда не инициализирован
+        if (currentTrackingEnabled) {
+            if (modeJustChanged || framesSinceTrackingMode < 0) {
+                framesSinceTrackingMode = 0;
+                bgsLearningRate = 1.0;  // мгновенный сброс модели
+            } else {
+                framesSinceTrackingMode++;
+                if (framesSinceTrackingMode <= 30)
+                    bgsLearningRate = 0.1;  // warmup
+                // после 30 кадров: bgsLearningRate остаётся 0.01
+            }
+        }
         // Frame-based settle: 9 кадров с LR=0.7 после каждого шага серво.
         // Быстро учит новый фон за 9 кадров (~200ms при 45fps), потом LR=0.01.
         // Нет postSettle с LR=0.3 — объект не поглощается в фон.
         bool cameraSettling = (servoSettleFrames > 0);
         if (cameraSettling) {
-            // LR=0.15: быстро адаптировать BGS к сдвигу камеры.
+            // LR=0.35: быстро адаптировать BGS к сдвигу камеры.
             // LR=0 → 30+ кадров слепоты. LR=0.7 → поглощает объект.
-            // LR=0.15 за 3 кадра: old=0.85^3=61% → 39% новый фон. Достаточно.
-            bgsLearningRate = 0.15;
+            // LR=0.35 за 6 кадров: old=0.65^6=7.5% → 92.5% новый фон.
+            bgsLearningRate = 0.35;
             servoSettleFrames--;
         }
         bool doReinitNow = needsBGSReinit;
@@ -1044,6 +1071,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 std::cout << "Target position: (" << d.x << ", " << d.y << ")" << std::endl;
             }
             std::cout << "Current servo: Yaw=" << lastYawDeg << "° Pitch=" << lastPitchDeg << "°" << std::endl;
+            std::cout << "BGS: fg=" << detector.lastFGPixels() << "px contours=" << detector.lastRawContours()
+                      << " LR=" << std::setprecision(2) << bgsLearningRate << (cameraSettling ? " [SETTLE]" : "") << std::setprecision(1) << std::endl;
             std::cout << "===================\n" << std::endl;
         }
         
@@ -1086,17 +1115,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             
             // Move servos only in TRACKING mode
             if (currentTrackingEnabled) {
-                // Два порога:
-                // > 0.8°: settle 200ms (подавляет детекцию пока камера дрожит).
-                //          БЕЗ reinit: postSettle LR=0.3 быстро адаптирует MOG2
-                //          к небольшому сдвигу без warmup-слепоты.
-                // > 3.0°: settle + полный reinit (фон меняется кардинально).
-                double moveAmount = std::abs(yawDeg - lastSentYawDeg)
-                                  + std::abs(pitchDeg - lastSentPitchDeg);
-                if (moveAmount > 2.0) {
-                    servoSettleFrames = 3;  // 3 кадра ~150ms при 20fps
-                    detector.resetConsecutive();  // сброс шумовых накоплений
-                }
+                // Всегда settle после ЛЮБОГО движения серво.
+                // Без порога: даже мелкие шаги (0.2°) от шумовых детекций
+                // накапливались в feedback loop → серво дрейфовало.
+                servoSettleFrames = 6;  // 6 кадров ~300ms при 20fps
+                detector.resetConsecutive();  // сброс шумовых накоплений
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
                 setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
                 lastSentYawDeg = yawDeg;

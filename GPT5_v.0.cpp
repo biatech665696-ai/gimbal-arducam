@@ -414,7 +414,7 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double learningRate = 0.005)
     {
-        const int MIN_DETECTIONS = 1;
+        const int MIN_DETECTIONS = 2;
         const int MAX_MISSES = 60;
 
         Detection d;

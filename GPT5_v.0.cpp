@@ -1034,7 +1034,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double norm_ex = ex / cx;
             double norm_ey = ey / cx;
-            const double MAX_STEP_DEG = 10.0;
+            const double MAX_STEP_DEG = 35.0;  // ≈ FOV_H/2 для OV64A40 ~70° FOV
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
             yawDeg   = lastYawDeg   - stepYaw;
@@ -1052,8 +1052,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
 
-            // Settle: 5 кадров (~250ms) для адаптации BGS к сдвигу
-            servoSettleFrames = 5;
+            // Settle: 2 кадра (~100ms) для адаптации BGS к сдвигу
+            servoSettleFrames = 2;
             detector.resetConsecutive();
         }
 

@@ -918,11 +918,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double lastSentYawDeg = 90.0;
     double lastSentPitchDeg = 90.0;
 
-    // Счётчик кадров стабилизации после движения серво
-    int servoSettleFrames = 0;
-    bool needsBGSReinit = false;
+    // === ДВУХФАЗНАЯ АРХИТЕКТУРА ===
+    // SEARCH: камера неподвижна, MOG2 ищет объект (работает идеально)
+    // TRACK: template matching следит за объектом, серво каждый кадр (20fps)
+    // Settle не нужен — template matching не зависит от фоновой модели.
+    enum TrackPhase { PHASE_SEARCH, PHASE_TRACK };
+    TrackPhase phase = PHASE_SEARCH;
+    cv::Mat trackTemplate;              // Шаблон для template matching
+    cv::Point2f trackPosSmall(-1, -1);  // Позиция в 0.25x координатах
+    int trackLostCount = 0;             // Кадров без match подряд
+    int templateAge = 0;                // Кадров с захвата шаблона
+    int searchWarmup = 0;               // Кадров BGS warmup
 
-    // Последний известный ROI (для адаптивной вырезки)
+    // Для визуализации
     cv::Rect lastROI;
 
     while(run)
@@ -941,39 +949,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         bool modeJustChanged = (prevTrackingEnabled != currentTrackingEnabled);
         prevTrackingEnabled = currentTrackingEnabled;
         
-        // === FIXED MODE: center servos, but still run detection below ===
+        // === FIXED MODE ===
         static int framesSinceFixedMode = 0;
-        // learningRate for BGS: 1.0 on mode change (instant reset), 0.05 for
-        // first 60 frames (fast warm-up at new static position), 0.01 normal
         double bgsLearningRate = 0.01;
-        // TRACKING warmup: аналог FIXED warmup (LR=1.0 + 30 кадров LR=0.1).
-        // Без этого MOG2 с пустой моделью на LR=0.01 — всё foreground → noise gate убивает →
-        // через 5с объект в фоне → вечная слепота.
-        static int framesSinceTrackingMode = -1;  // -1 = никогда не инициализирован
-        if (currentTrackingEnabled) {
-            if (modeJustChanged || framesSinceTrackingMode < 0) {
-                framesSinceTrackingMode = 0;
-                bgsLearningRate = 1.0;  // мгновенный сброс модели
-            } else {
-                framesSinceTrackingMode++;
-                if (framesSinceTrackingMode <= 30)
-                    bgsLearningRate = 0.1;  // warmup
-                // после 30 кадров: bgsLearningRate остаётся 0.01
-            }
-        }
-        // Frame-based settle: 9 кадров с LR=0.7 после каждого шага серво.
-        // Быстро учит новый фон за 9 кадров (~200ms при 45fps), потом LR=0.01.
-        // Нет postSettle с LR=0.3 — объект не поглощается в фон.
-        bool cameraSettling = (servoSettleFrames > 0);
-        if (cameraSettling) {
-            // LR=0.35: быстро адаптировать BGS к сдвигу камеры.
-            // LR=0 → 30+ кадров слепоты. LR=0.7 → поглощает объект.
-            // LR=0.35 за 6 кадров: old=0.65^6=7.5% → 92.5% новый фон.
-            bgsLearningRate = 0.35;
-            servoSettleFrames--;
-        }
-        bool doReinitNow = needsBGSReinit;
-        needsBGSReinit = false;
+
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 framesSinceFixedMode = 0;
@@ -984,76 +963,187 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             } else {
                 framesSinceFixedMode++;
                 bgsLearningRate = (framesSinceFixedMode <= 30) ? 0.1 : 0.01;
-                // setServoAngle кэширует duty — повторная запись 90° бесплатна
                 setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
                 setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
             }
             lastYawDeg   = 90.0;
             lastPitchDeg = 90.0;
+            phase = PHASE_SEARCH;
         }
 
-        // === DETECTION - runs in BOTH FIXED and TRACKING modes ===
-        cv::Mat display = f.frame.clone();  // For visualization
+        // При переключении FIXED → TRACKING: начинаем с SEARCH
+        if (modeJustChanged && currentTrackingEnabled) {
+            phase = PHASE_SEARCH;
+            searchWarmup = 0;
+            detector.reinitBGS();
+        }
 
-        // Resize to 0.25x for fast processing (480x270 instead of 960x540)
+        // === FRAME PREPARATION ===
+        cv::Mat display = f.frame.clone();
         cv::Mat resized;
         cv::resize(f.frame, resized, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
-        
         cv::Mat gray;
         cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
 
-        // Reinit BGS если нужен полный сброс
-        if (doReinitNow)
-            detector.reinitBGS();
+        Detection d;
+        d.valid = false;
+        double yawDeg = lastYawDeg;
+        double pitchDeg = lastPitchDeg;
 
-        // Детекция всегда на полном кадре 0.25x — ROI ломает MOG2
-        // (сдвиг ROI между кадрами делает per-pixel модель фона невалидной)
-        Detection d = detector.detect(gray, 0, 0, bgsLearningRate);
-        
-        // Noise gate: >10 объектов = шум от сдвига камеры, не реальные цели.
-        // MOG2 при сдвиге видит ВСЕ пиксели как "движение" → 70-100+ контуров.
-        if ((int)d.all_boxes.size() > 10) {
-            d.valid = false;
-            d.all_boxes.clear();
+        // ============================================================
+        // ФАЗА 1: FIXED — только детекция для визуализации
+        // ============================================================
+        if (!currentTrackingEnabled) {
+            d = detector.detect(gray, 0, 0, bgsLearningRate);
+            if ((int)d.all_boxes.size() > 10) { d.valid = false; d.all_boxes.clear(); }
+            if (d.valid) { d.x *= 4; d.y *= 4; d.box_x *= 4; d.box_y *= 4; d.box_w *= 4; d.box_h *= 4; }
+            for (auto& box : d.all_boxes) { box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4; }
+        }
+        // ============================================================
+        // ФАЗА 2: SEARCH — камера стоит, MOG2 ищет объект
+        // ============================================================
+        else if (phase == PHASE_SEARCH) {
+            // BGS warmup: LR=1.0 (мгновенный сброс) → 0.1 (warmup) → 0.01
+            if (searchWarmup == 0)       bgsLearningRate = 1.0;
+            else if (searchWarmup <= 20) bgsLearningRate = 0.1;
+            else                         bgsLearningRate = 0.01;
+            searchWarmup++;
+
+            d = detector.detect(gray, 0, 0, bgsLearningRate);
+
+            // Noise gate
+            if ((int)d.all_boxes.size() > 10) { d.valid = false; d.all_boxes.clear(); }
+
+            // При валидной детекции: захват шаблона → TRACK
+            if (d.valid) {
+                // Шаблон = bbox + padding (для контекста вокруг объекта)
+                int pad = std::max(d.box_w, d.box_h) * 2;
+                pad = std::max(pad, 15);  // минимум 15px отступа
+                int tx = d.box_x - pad, ty = d.box_y - pad;
+                int tw = d.box_w + 2*pad, th = d.box_h + 2*pad;
+                tx = std::max(0, tx); ty = std::max(0, ty);
+                if (tx + tw > gray.cols) tw = gray.cols - tx;
+                if (ty + th > gray.rows) th = gray.rows - ty;
+
+                if (tw >= 10 && th >= 10) {
+                    trackTemplate = gray(cv::Rect(tx, ty, tw, th)).clone();
+                    trackPosSmall = cv::Point2f(d.x, d.y);
+                    trackLostCount = 0;
+                    templateAge = 0;
+                    phase = PHASE_TRACK;
+                }
+            }
+
+            // Масштаб → full-res для визуализации
+            if (d.valid) { d.x *= 4; d.y *= 4; d.box_x *= 4; d.box_y *= 4; d.box_w *= 4; d.box_h *= 4; }
+            for (auto& box : d.all_boxes) { box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4; }
+
+            // В SEARCH серво НЕ двигается → MOG2 работает корректно
+        }
+        // ============================================================
+        // ФАЗА 3: TRACK — template matching каждый кадр, серво следит
+        // ============================================================
+        else { // PHASE_TRACK
+            // Фоновую модель продолжаем обновлять (LR=0.05) чтобы при
+            // возврате в SEARCH она была актуальна.
+            detector.detect(gray, 0, 0, 0.05);
+
+            // Template matching в области поиска вокруг последней позиции
+            const int SEARCH_PAD = 50;  // пикселей в 0.25x
+            int sx = (int)trackPosSmall.x - trackTemplate.cols/2 - SEARCH_PAD;
+            int sy = (int)trackPosSmall.y - trackTemplate.rows/2 - SEARCH_PAD;
+            int sw = trackTemplate.cols + 2*SEARCH_PAD;
+            int sh = trackTemplate.rows + 2*SEARCH_PAD;
+            sx = std::max(0, sx); sy = std::max(0, sy);
+            if (sx + sw > gray.cols) sw = gray.cols - sx;
+            if (sy + sh > gray.rows) sh = gray.rows - sy;
+
+            bool matchGood = false;
+            double matchScore = 0;
+            if (sw > trackTemplate.cols && sh > trackTemplate.rows) {
+                cv::Mat searchRoi = gray(cv::Rect(sx, sy, sw, sh));
+                cv::Mat result;
+                cv::matchTemplate(searchRoi, trackTemplate, result, cv::TM_CCOEFF_NORMED);
+                double maxVal;
+                cv::Point maxLoc;
+                cv::minMaxLoc(result, nullptr, &maxVal, nullptr, &maxLoc);
+                matchScore = maxVal;
+
+                if (maxVal >= 0.35) {
+                    matchGood = true;
+                    trackPosSmall.x = sx + maxLoc.x + trackTemplate.cols / 2.0f;
+                    trackPosSmall.y = sy + maxLoc.y + trackTemplate.rows / 2.0f;
+                    trackLostCount = 0;
+                    templateAge++;
+
+                    // Формируем Detection для визуализации и P-контроллера
+                    d.x = trackPosSmall.x * 4.0;
+                    d.y = trackPosSmall.y * 4.0;
+                    d.box_x = (sx + maxLoc.x) * 4;
+                    d.box_y = (sy + maxLoc.y) * 4;
+                    d.box_w = trackTemplate.cols * 4;
+                    d.box_h = trackTemplate.rows * 4;
+                    d.valid = true;
+                    d.all_boxes.push_back(cv::Rect(d.box_x, d.box_y, d.box_w, d.box_h));
+
+                    // Обновляем шаблон каждые 30 кадров
+                    if (templateAge >= 30) {
+                        int ntx = (int)trackPosSmall.x - trackTemplate.cols/2;
+                        int nty = (int)trackPosSmall.y - trackTemplate.rows/2;
+                        ntx = std::max(0, ntx); nty = std::max(0, nty);
+                        int ntw = trackTemplate.cols, nth = trackTemplate.rows;
+                        if (ntx + ntw > gray.cols) ntw = gray.cols - ntx;
+                        if (nty + nth > gray.rows) nth = gray.rows - nty;
+                        if (ntw >= 10 && nth >= 10) {
+                            trackTemplate = gray(cv::Rect(ntx, nty, ntw, nth)).clone();
+                            templateAge = 0;
+                        }
+                    }
+                }
+            }
+
+            if (!matchGood) {
+                trackLostCount++;
+                if (trackLostCount > 15) {
+                    // Потеряли объект → обратно в SEARCH
+                    phase = PHASE_SEARCH;
+                    searchWarmup = 0;
+                    detector.reinitBGS();
+                }
+            }
+
+            // === P-КОНТРОЛЛЕР: серво следует КАЖДЫЙ КАДР (нет settle!) ===
+            if (d.valid) {
+                double ex = d.x - cx;
+                double ey = d.y - cy;
+                double norm_ex = ex / cx;
+                double norm_ey = ey / cx;
+                const double MAX_STEP_DEG = 8.0;
+                double stepYaw   = norm_ex * MAX_STEP_DEG;
+                double stepPitch = norm_ey * MAX_STEP_DEG;
+                yawDeg   = lastYawDeg   - stepYaw;
+                pitchDeg = lastPitchDeg - stepPitch;
+
+                if (yawDeg < 5.0)   yawDeg = 5.0;
+                if (yawDeg > 175.0) yawDeg = 175.0;
+                if (pitchDeg < 5.0)   pitchDeg = 5.0;
+                if (pitchDeg > 175.0) pitchDeg = 175.0;
+
+                lastYawDeg = yawDeg;
+                lastPitchDeg = pitchDeg;
+                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+                lastSentYawDeg = yawDeg;
+                lastSentPitchDeg = pitchDeg;
+            }
         }
 
-        // Settle suppression: после движения серво, MOG2 видит сдвиг как движение.
-        // Без подавления → ложные детекции → ещё движение → положительная ОС.
-        // Noise gate (>10) не ловит 1-9 ложных объектов. Подавление обязательно.
-        if (cameraSettling) {
-            d.valid = false;
-            d.all_boxes.clear();
-        }
-
-        // ROI для визуализации (не для детекции!)
+        // ROI для визуализации
         if (d.valid) {
-            lastROI = computeROI(d.x, d.y, gray.cols, gray.rows, d.box_w, d.box_h);
+            lastROI = computeROI(d.x, d.y, display.cols, display.rows, d.box_w, d.box_h);
         }
 
-        // Scale detection coordinates back to original resolution (0.25x -> 1x = *4)
-        if (d.valid) {
-            d.x *= 4.0;
-            d.y *= 4.0;
-            d.box_x *= 4;
-            d.box_y *= 4;
-            d.box_w *= 4;
-            d.box_h *= 4;
-        }
-        
-        // Scale all detected boxes back to original resolution
-        for (auto& box : d.all_boxes) {
-            box.x *= 4;
-            box.y *= 4;
-            box.width *= 4;
-            box.height *= 4;
-        }
-
-        // Kalman/predictFuture удалены — серво управляется прямым P-контроллером.
-        // Kalman velocity prediction вызывал overshoot при редкой детекции.
-
-        // === SERVO CONTROL (only in TRACKING mode) ===
-        
-        // Debug: Show tracking state + FPS
+        // Debug status
         static int frameCounter = 0;
         static auto fpsTimer = std::chrono::steady_clock::now();
         frameCounter++;
@@ -1062,80 +1152,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double elapsed = std::chrono::duration<double>(fpsNow - fpsTimer).count();
             double fps = 30.0 / elapsed;
             fpsTimer = fpsNow;
+            const char* phaseStr = (phase == PHASE_SEARCH) ? "SEARCH" : "TRACK";
             std::cout << "\n=== TRACKING STATUS ===" << std::endl;
             std::cout << "FPS: " << std::fixed << std::setprecision(1) << fps << std::endl;
-            std::cout << "Mode: " << (currentTrackingEnabled ? "TRACKING" : "FIXED") << std::endl;
-            std::cout << "Objects detected: " << d.all_boxes.size() << std::endl;
-            std::cout << "Valid target: " << (d.valid ? "YES" : "NO") << std::endl;
-            if (d.valid) {
-                std::cout << "Target position: (" << d.x << ", " << d.y << ")" << std::endl;
-            }
-            std::cout << "Current servo: Yaw=" << lastYawDeg << "° Pitch=" << lastPitchDeg << "°" << std::endl;
-            std::cout << "BGS: fg=" << detector.lastFGPixels() << "px contours=" << detector.lastRawContours()
-                      << " LR=" << std::setprecision(2) << bgsLearningRate << (cameraSettling ? " [SETTLE]" : "") << std::setprecision(1) << std::endl;
+            std::cout << "Mode: " << (currentTrackingEnabled ? "TRACKING" : "FIXED")
+                      << " Phase: " << phaseStr << std::endl;
+            std::cout << "Objects: " << d.all_boxes.size()
+                      << " Valid: " << (d.valid ? "YES" : "NO") << std::endl;
+            if (d.valid)
+                std::cout << "Target: (" << (int)d.x << ", " << (int)d.y << ")" << std::endl;
+            std::cout << "Servo: Yaw=" << lastYawDeg << "° Pitch=" << lastPitchDeg << "°" << std::endl;
+            if (phase == PHASE_SEARCH)
+                std::cout << "BGS: fg=" << detector.lastFGPixels() << "px warmup=" << searchWarmup << std::endl;
+            else
+                std::cout << "Template: " << trackTemplate.cols << "x" << trackTemplate.rows
+                          << " age=" << templateAge << " lost=" << trackLostCount << std::endl;
             std::cout << "===================\n" << std::endl;
         }
-        
-        double yawDeg = lastYawDeg;
-        double pitchDeg = lastPitchDeg;
-        
-        // TRACKING MODE: Follow detected objects
-        if (d.valid) {
-            // Прямой P-контроллер от сырых пиксельных координат.
-            // Kalman добавлял velocity prediction, которое расходилось за 2с
-            // без детекции → overshoot → серво улетало.
-            double ex = d.x - cx;  // >0 объект справа
-            double ey = d.y - cy;  // >0 объект снизу
-
-            double norm_ex = ex / cx;  // [-1..+1]
-            double norm_ey = ey / cx;  // cx для обеих осей
-
-            const double MAX_STEP_DEG = 10.0;  // макс шаг за кадр (нужен большой при редкой детекции)
-            double stepYaw   = norm_ex * MAX_STEP_DEG;
-            double stepPitch = norm_ey * MAX_STEP_DEG;
-
-            // Применяем шаг к текущей позиции серво
-            yawDeg   = lastYawDeg   - stepYaw;
-            pitchDeg = lastPitchDeg - stepPitch;
-
-            if (kVerboseTrackingLogs) {
-                std::cout << "err=(" << (int)ex << "," << (int)ey << "px)"
-                         << " step=(" << stepYaw << "°," << stepPitch << "°)"
-                         << " -> Yaw=" << yawDeg << "° Pitch=" << pitchDeg << "°" << std::endl;
-            }
-            
-            // Safety limits
-            if (yawDeg < 5.0) yawDeg = 5.0;
-            if (yawDeg > 175.0) yawDeg = 175.0;
-            if (pitchDeg < 5.0) pitchDeg = 5.0;
-            if (pitchDeg > 175.0) pitchDeg = 175.0;
-
-            lastYawDeg = yawDeg;
-            lastPitchDeg = pitchDeg;
-            
-            // Move servos only in TRACKING mode
-            if (currentTrackingEnabled) {
-                // Всегда settle после ЛЮБОГО движения серво.
-                // Без порога: даже мелкие шаги (0.2°) от шумовых детекций
-                // накапливались в feedback loop → серво дрейфовало.
-                servoSettleFrames = 6;  // 6 кадров ~300ms при 20fps
-                detector.resetConsecutive();  // сброс шумовых накоплений
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-                lastSentYawDeg = yawDeg;
-                lastSentPitchDeg = pitchDeg;
-            }
-        } else {
-            // No target detected - hold last position
-            yawDeg = lastYawDeg;
-            pitchDeg = lastPitchDeg;
-        }
-
-        // NOTE: cx and cy MUST remain fixed at the optical center of the camera
-        // (CX, CY constants). Moving them to d.x/d.y "zeroes out" the angular
-        // error every frame and completely disables tracking — the servo would
-        // always compute theta≈0, phi≈0 and stay at 90°.
-        // (old buggy code: if(d.valid){ cx=d.x; cy=d.y; } ← REMOVED)
         
 
 

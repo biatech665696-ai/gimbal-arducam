@@ -397,6 +397,7 @@ public:
         , lastGlobalFlow_(0, 0)
         , framesSinceMotion_(999)
         , prevRawFG_(0)
+        , cooldownFrames_(0)
     {
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
@@ -414,6 +415,7 @@ public:
         mog2_->setBackgroundRatio(0.9);
         prevGray_ = cv::Mat();
         prevRawFG_ = 0;
+        cooldownFrames_ = 0;
     }
     void resetCounters()
     {
@@ -514,6 +516,22 @@ public:
         if (rawFG > 2000) {
             lastRawContours_ = 0;
             consecutiveDetections_ = 0;
+            cooldownFrames_ = 5;  // require 5 clean frames after noise
+            return d;
+        }
+
+        // === OF VALIDATION ===
+        // Camera still moving (flow>1.0) but FG below gate → residual noise
+        if (flowMag > 1.0f) {
+            consecutiveDetections_ = 0;
+            cooldownFrames_ = std::max(cooldownFrames_, 2);
+        }
+
+        // === COOLDOWN ===
+        if (cooldownFrames_ > 0) {
+            cooldownFrames_--;
+            consecutiveDetections_ = 0;
+            lastRawContours_ = (int)0;
             return d;
         }
 
@@ -580,7 +598,7 @@ public:
 
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
-                    if (distance < 150.0) {
+                    if (distance < 50.0) {  // at 0.25x = 200px full-res
                         foundCandidate = true;
                         consecutiveDetections_++;
                         consecutiveMisses_ = 0;
@@ -631,6 +649,7 @@ private:
     cv::Point2f lastGlobalFlow_;
     int framesSinceMotion_;
     int prevRawFG_;
+    int cooldownFrames_;  // frames since last FG gate/noise gate
 };
 
 /* =============== ROI COMPUTATION =============== */

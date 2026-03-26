@@ -1009,12 +1009,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             d.all_boxes.clear();
         }
 
-        // Settle suppression: после движения серво MOG2 видит сдвиг
-        if (cameraSettling && currentTrackingEnabled) {
-            d.valid = false;
-            d.all_boxes.clear();
-        }
-
         // Scale → full-res
         if (d.valid) {
             d.x *= 4; d.y *= 4;

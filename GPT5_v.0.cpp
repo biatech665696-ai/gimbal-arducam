@@ -414,7 +414,7 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double learningRate = 0.005)
     {
-        const int MIN_DETECTIONS = 2;
+        const int MIN_DETECTIONS = 3;
         const int MAX_MISSES = 60;
 
         Detection d;
@@ -983,7 +983,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (!currentTrackingEnabled) {
             // FIXED mode: LR already set by framesSinceFixedMode above
         } else if (cameraSettling) {
-            bgsLearningRate = 0.35;  // быстро учим новый фон после сдвига
+            bgsLearningRate = 0.7;  // агрессивно учим новый фон (5 кадров × 0.7 = 99.8% адаптации)
             servoSettleFrames--;
         } else if (bgsWarmupFrames == 0) {
             bgsLearningRate = 1.0;   // мгновенный сброс при старте
@@ -996,17 +996,26 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === DETECTION (каждый кадр, и FIXED и TRACKING) ===
         Detection d = detector.detect(gray, 0, 0, bgsLearningRate);
 
+        // Settle suppression: во время адаптации BGS все детекции — шум от сдвига камеры
+        if (cameraSettling) {
+            d.valid = false;
+            d.all_boxes.clear();
+            detector.resetConsecutive();  // не накапливать шум в счётчике
+        }
+
         // FG pixel gate: слишком много foreground = камера сдвинулась.
         // Нормальная детекция: fg=10-100px. Сдвиг камеры: fg=3000-35000px.
         if (detector.lastFGPixels() > 500) {
             d.valid = false;
             d.all_boxes.clear();
+            detector.resetConsecutive();  // КЛЮЧЕВОЙ ФИX: не переносить шумовой счётчик
         }
 
         // Noise gate: >5 объектов = шум от сдвига камеры
         if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
+            detector.resetConsecutive();
         }
 
         // Scale → full-res
@@ -1046,8 +1055,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
 
-            // Settle: 3 кадра (~150ms) для адаптации BGS к сдвигу
-            servoSettleFrames = 3;
+            // Settle: 5 кадров (~250ms) при LR=0.7 → 99.8% адаптации BGS
+            servoSettleFrames = 5;
         }
 
         // ROI для визуализации

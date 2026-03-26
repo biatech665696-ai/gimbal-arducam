@@ -431,7 +431,7 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
-        const int MIN_DETECTIONS = 2;
+        const int MIN_DETECTIONS = 1;
         const int MAX_MISSES = 60;
 
         Detection d;
@@ -611,7 +611,7 @@ public:
 
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
-                    if (distance < 50.0) {  // at 0.25x = 200px full-res
+                    if (distance < 80.0) {  // at 0.25x = 320px full-res
                         // Direction check: reject if moving back toward previous position
                         // (MOG2 ghost at t-1 position looks like a valid nearby detection)
                         bool directionOK = true;
@@ -1009,8 +1009,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === DETECTION (каждый кадр, без settle) ===
         Detection d = detector.detect(gray, 0, 0);
 
-        // Noise gate: >3 объектов после фильтрации = шум MOG2
-        if ((int)d.all_boxes.size() > 3) {
+        // Noise gate: >5 объектов после фильтрации = шум MOG2
+        if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
             detector.resetConsecutive();

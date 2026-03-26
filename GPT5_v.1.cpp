@@ -417,9 +417,8 @@ public:
     {
         const int MIN_DETECTIONS = 3;
         const int MAX_MISSES = 60;
-        const float FG_THRESHOLD = 25.0f;  // порог разницы от bg model
+        const float FG_THRESHOLD = 15.0f;  // 25 убивало маленькие объекты; CLAHE убран → шум ниже
         const float BG_ALPHA = 0.97f;      // 97% старый bg, 3% новый кадр (~1.5s tau)
-        const float CAMERA_RESET_PX = 8.0f; // при сдвиге > 8px — reset bg model
 
         Detection d;
         d.valid = false;
@@ -430,7 +429,7 @@ public:
         else
             gray = roi.clone();
 
-        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.5);
+        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0.8);
 
         cv::Mat curFloat;
         gray.convertTo(curFloat, CV_32F);
@@ -480,17 +479,12 @@ public:
         // Update prevGray for next frame's LK
         prevGray_ = gray.clone();
 
-        // === CAMERA MOTION GUARD ===
+        // === CAMERA MOTION: just let warp handle it ===
+        // Removing full bg reset that was destroying accumulated model.
+        // The affine warp already aligns bgModel to current frame.
+        // FG gate handles residual noise from imperfect warp.
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
-        if (flowMag > CAMERA_RESET_PX) {
-            // Large motion → bg model is too misaligned, reset it
-            bgModel_ = curFloat.clone();
-            lastFGPixels_ = 0;
-            lastRawContours_ = 0;
-            consecutiveDetections_ = 0;
-            return d;
-        }
 
         // === WARP BACKGROUND MODEL to current frame alignment ===
         cv::Mat bgWarped;
@@ -522,18 +516,18 @@ public:
         // "foreground", and protected fg pixels never learned — eternal fg.
         cv::addWeighted(bgWarped, BG_ALPHA, curFloat, 1.0 - BG_ALPHA, 0.0, bgModel_);
 
-        // === FG PIXEL GATE with hysteresis ===
+        // === FG PIXEL GATE ===
+        // Skip frame if too much fg (servo moved → imperfect warp residual)
+        // but do NOT reset consecutive: real object persists across skipped frames
         lastFGPixels_ = cv::countNonZero(fgMask);
         if (lastFGPixels_ > 500) {
             lastRawContours_ = 0;
-            consecutiveDetections_ = 0;
-            fgGateCooldown_ = 10;  // 10 frames (~0.5s) cooldown after spike
+            fgGateCooldown_ = 3;  // 3 frames cooldown
             return d;
         }
         if (fgGateCooldown_ > 0) {
             fgGateCooldown_--;
             lastRawContours_ = 0;
-            consecutiveDetections_ = 0;
             return d;
         }
 

@@ -1054,33 +1054,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         
         // TRACKING MODE: Follow detected objects
         if (d.valid) {
-            double thetaDeg = (s.theta * 180.0 / M_PI);
-            double phiDeg   = (s.phi   * 180.0 / M_PI);
+            // Прямой P-контроллер от сырых пиксельных координат.
+            // Kalman добавлял velocity prediction, которое расходилось за 2с
+            // без детекции → overshoot → серво улетало.
+            double ex = d.x - cx;  // >0 объект справа
+            double ey = d.y - cy;  // >0 объект снизу
 
-            // Kalman-сглаженная ошибка в пикселях (убирает дрожание детекции)
-            // SYSTEM_DELAY=0.045: минимальное предсказание вперёд
-            double ex = s.theta * F;  // >0 объект справа
-            double ey = s.phi   * F;  // >0 объект снизу
+            double norm_ex = ex / cx;  // [-1..+1]
+            double norm_ey = ey / cx;  // cx для обеих осей
 
-            // Нормируем на cx (960) для ОБЕИХ осей — симметричный отклик.
-            // Раньше cy=540 давал вертикальный шаг в 960/540=1.78x больше
-            // горизонтального → серво описывало эллипс вместо круга.
-            double norm_ex = ex / cx;
-            double norm_ey = ey / cx;  // cx, не cy!
-
-            // Шаг прямо пропорционален расстоянию: MAX_STEP_DEG при объекте у края
-            const double MAX_STEP_DEG = 15.0;
+            const double MAX_STEP_DEG = 5.0;  // макс шаг за кадр
             double stepYaw   = norm_ex * MAX_STEP_DEG;
             double stepPitch = norm_ey * MAX_STEP_DEG;
 
             // Применяем шаг к текущей позиции серво
-            // Знаки: объект справа (ex>0) → серво вправо (yaw убывает по нашей конвенции)
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;
 
             if (kVerboseTrackingLogs) {
-                std::cout << "theta=" << thetaDeg << "° phi=" << phiDeg
-                         << "° err=(" << (int)ex << "," << (int)ey << "px)"
+                std::cout << "err=(" << (int)ex << "," << (int)ey << "px)"
                          << " step=(" << stepYaw << "°," << stepPitch << "°)"
                          << " -> Yaw=" << yawDeg << "° Pitch=" << pitchDeg << "°" << std::endl;
             }

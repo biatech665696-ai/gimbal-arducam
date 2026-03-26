@@ -509,9 +509,11 @@ public:
         prevRawFG_ = rawFG;
 
         // === FG PIXEL GATE ===
-        // Skip detection but don't reset consecutive — real object persists
+        // High fg = camera shift noise. Reset consecutive to prevent
+        // noise carry-over to first clean frame.
         if (rawFG > 2000) {
             lastRawContours_ = 0;
+            consecutiveDetections_ = 0;
             return d;
         }
 
@@ -523,6 +525,14 @@ public:
 
         lastFGPixels_ = cv::countNonZero(fgMask);
         lastRawContours_ = (int)contours.size();
+
+        // === RAW CONTOUR GATE ===
+        // >15 raw contours = MOG2 still has residual from camera shift.
+        // Real scene: 1-5 contours. Post-move residual: 40-200 contours.
+        if ((int)contours.size() > 15) {
+            consecutiveDetections_ = 0;
+            return d;
+        }
 
         // === ФИЛЬТРАЦИЯ КОНТУРОВ ===
         std::vector<std::pair<double, int>> validObjects;
@@ -1012,8 +1022,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === DETECTION (каждый кадр, без settle) ===
         Detection d = detector.detect(gray, 0, 0);
 
-        // Noise gate: >10 объектов = что-то пошло не так
-        if ((int)d.all_boxes.size() > 10) {
+        // Noise gate: >5 объектов после фильтрации = шум MOG2
+        if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
             detector.resetConsecutive();

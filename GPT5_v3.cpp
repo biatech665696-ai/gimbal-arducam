@@ -1140,7 +1140,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double scanYawDeg = 0.0;              // Current scan position
     int scanDirection = 1;                // 1 = forward (0→180), -1 = backward (180→0)
     const double SCAN_STEP = 30.0;        // Degrees per step
-    const double SCAN_DWELL_SEC = 5.0;    // Seconds to dwell at each position
+    const double SCAN_DWELL_SEC = 1.0;    // Seconds to dwell at each position
     auto scanStepTime = std::chrono::steady_clock::now();
     bool scanDwelling = false;            // True while waiting at a scan position
     auto noDetectionSince = std::chrono::steady_clock::now();

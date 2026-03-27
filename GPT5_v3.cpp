@@ -152,6 +152,8 @@ std::atomic<bool> hasNewFrame(false);
 std::atomic<bool> streamRunning(false);
 std::atomic<bool> remoteQuit(false);
 std::atomic<bool> remoteToggle(false);
+std::atomic<bool> remoteScanToggle(false);
+std::atomic<bool> remoteTrajToggle(false);
 cv::Mat streamFrame;
 std::mutex streamMutex;
 const int STREAM_PORT = 8080;
@@ -185,6 +187,12 @@ static void* handleHttpClient(void* arg) {
         } else if (cmd == "f") {
             std::cout << "\n[REMOTE] Toggle mode command received" << std::endl;
             remoteToggle = true;
+        } else if (cmd == "s") {
+            std::cout << "\n[REMOTE] Toggle scan command received" << std::endl;
+            remoteScanToggle = true;
+        } else if (cmd == "t") {
+            std::cout << "\n[REMOTE] Toggle trajectory command received" << std::endl;
+            remoteTrajToggle = true;
         }
         send(clientSocket, ok.c_str(), ok.length(), 0);
         close(clientSocket);
@@ -199,12 +207,13 @@ static void* handleHttpClient(void* arg) {
             "<html><body style='margin:0;background:#000;display:flex;flex-direction:column;"
             "justify-content:center;align-items:center;height:100vh' tabindex='0'>"
             "<img src='/stream.mjpg' style='max-width:100%;max-height:90vh'>"
-            "<div style='color:#0ff;font:20px monospace;margin-top:10px'>Q: Quit | F: Toggle mode</div>"
+            "<div style='color:#0ff;font:20px monospace;margin-top:10px'>"
+            "Q: Quit | F: Track/Fixed | S: Scan | T: Trajectory</div>"
             "<script>"
             "document.body.focus();"
             "document.addEventListener('keydown',function(e){"
             "  var k=e.key.toLowerCase();"
-            "  if(k=='q'||k=='escape'||k=='f'){"
+            "  if(k=='q'||k=='escape'||k=='f'||k=='s'||k=='t'){"
             "    fetch('/cmd/'+( k=='escape'?'q':k ));"
             "  }"
             "});"
@@ -1527,6 +1536,36 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         
         // Update display frame
         {
+            // === KEY HELP OVERLAY (bottom-right corner) ===
+            const char* helpLines[] = {
+                "F - Track / Fixed",
+                "S - Scan on/off",
+                "T - Trajectory on/off",
+                "Q - Quit"
+            };
+            const int nLines = 4;
+            const double fontScale = 0.65;
+            const int thickness = 2;
+            const int lineH = 28;
+            const int padX = 12, padY = 8;
+            int boxW = 280;
+            int boxH = nLines * lineH + padY * 2;
+            int bx = display.cols - boxW - 10;
+            int by = display.rows - boxH - 10;
+
+            cv::Mat overlay = display.clone();
+            cv::rectangle(overlay, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
+                         cv::Scalar(0, 0, 0), -1);
+            cv::addWeighted(overlay, 0.6, display, 0.4, 0, display);
+            cv::rectangle(display, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
+                         cv::Scalar(0, 255, 255), 2);
+
+            for (int i = 0; i < nLines; i++) {
+                cv::putText(display, helpLines[i],
+                           cv::Point(bx + padX, by + padY + (i + 1) * lineH - 5),
+                           cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 255, 255), thickness);
+            }
+
             std::lock_guard<std::mutex> lock(displayMutex);
             displayFrame = display;
             hasNewFrame = true;
@@ -1624,10 +1663,10 @@ int main()
             std::cout << "\n=== QUIT " << (remoteQuit.load() ? "(REMOTE)" : "(LOCAL)") << " ===" << std::endl;
             run = false;
             break;
-        } else if (key == 't' || key == 'T') {  // T - toggle trajectory drawing
+        } else if (key == 't' || key == 'T' || remoteTrajToggle.exchange(false)) {  // T - toggle trajectory
             bool wasT = trajectoryEnabled.exchange(!trajectoryEnabled.load());
             std::cout << ">>> TRAJECTORY " << (!wasT ? "ON" : "OFF") << " <<<" << std::endl;
-        } else if (key == 's' || key == 'S') {  // S - toggle scan mode
+        } else if (key == 's' || key == 'S' || remoteScanToggle.exchange(false)) {  // S - toggle scan mode
             bool wasScan = scanEnabled.exchange(!scanEnabled.load());
             bool nowScan = !wasScan;
             if (nowScan) {

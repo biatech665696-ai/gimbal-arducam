@@ -347,6 +347,7 @@ const double F  = 1200.0;  // Focal length in pixels (approximate for wide field
 std::atomic<bool> trackingEnabled(true);  // Start with tracking ENABLED by default
 std::atomic<bool> scanEnabled(false);     // Scan mode OFF by default
 std::atomic<bool> scanActiveNow(false);   // True when scan is currently driving servos
+std::atomic<bool> trajectoryEnabled(true); // Trajectory drawing ON by default
 
 /* =============== PWM CONTROL FUNCTIONS =============== */
 
@@ -1396,17 +1397,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === TRAJECTORY: последние 30 валидных детекций (красный) ===
         static std::deque<cv::Point2f> trajHistory;
 
-        if (d.valid) {
-            trajHistory.push_back(cv::Point2f(d.x, d.y));
-            if (trajHistory.size() > 30) trajHistory.pop_front();
-        }
+        if (trajectoryEnabled.load()) {
+            if (d.valid) {
+                trajHistory.push_back(cv::Point2f(d.x, d.y));
+                if (trajHistory.size() > 30) trajHistory.pop_front();
+            }
 
-        for (int i = 0; i < (int)trajHistory.size(); i++) {
-            int alpha = 80 + 175 * i / std::max((int)trajHistory.size() - 1, 1);
-            cv::Scalar col(0, 0, alpha);  // красный (BGR), от тёмного к яркому
-            if (i > 0)
-                cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
-            cv::circle(display, trajHistory[i], 4, col, -1);
+            for (int i = 0; i < (int)trajHistory.size(); i++) {
+                int alpha = 80 + 175 * i / std::max((int)trajHistory.size() - 1, 1);
+                cv::Scalar col(0, 0, alpha);  // красный (BGR), от тёмного к яркому
+                if (i > 0)
+                    cv::line(display, trajHistory[i-1], trajHistory[i], col, 2);
+                cv::circle(display, trajHistory[i], 4, col, -1);
+            }
+        } else {
+            trajHistory.clear();
         }
 
         // Рисуем куда целится серво (позиция детекции)
@@ -1564,6 +1569,7 @@ int main()
     std::cout << "Controls:" << std::endl;
     std::cout << "  F   - Toggle tracking mode (FIXED 90deg <-> TRACKING ON)" << std::endl;
     std::cout << "  S   - Toggle scan mode (scan 0-180 deg when no object)" << std::endl;
+    std::cout << "  T   - Toggle trajectory drawing" << std::endl;
     std::cout << "  Q   - Quit program" << std::endl;
     std::cout << "  ESC - Quit program" << std::endl;
     std::cout << "\n*** TRACKING MODE ENABLED BY DEFAULT ***" << std::endl;
@@ -1618,6 +1624,9 @@ int main()
             std::cout << "\n=== QUIT " << (remoteQuit.load() ? "(REMOTE)" : "(LOCAL)") << " ===" << std::endl;
             run = false;
             break;
+        } else if (key == 't' || key == 'T') {  // T - toggle trajectory drawing
+            bool wasT = trajectoryEnabled.exchange(!trajectoryEnabled.load());
+            std::cout << ">>> TRAJECTORY " << (!wasT ? "ON" : "OFF") << " <<<" << std::endl;
         } else if (key == 's' || key == 'S') {  // S - toggle scan mode
             bool wasScan = scanEnabled.exchange(!scanEnabled.load());
             bool nowScan = !wasScan;

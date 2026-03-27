@@ -1250,18 +1250,18 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     scanActiveNow = true;
 
                     if (!wasScanning) {
-                        // Just entered scan mode — initialize
+                        // Just entered scan mode — start from current position
                         wasScanning = true;
-                        scanYawDeg = lastYawDeg;  // start from current position
-                        // Round to nearest step
-                        scanYawDeg = std::round(scanYawDeg / SCAN_STEP) * SCAN_STEP;
+                        scanYawDeg = std::round(lastYawDeg / SCAN_STEP) * SCAN_STEP;
                         if (scanYawDeg < 0) scanYawDeg = 0;
                         if (scanYawDeg > 180) scanYawDeg = 180;
-                        scanDirection = 1;
+                        // If >= 90° go toward 180 first; if < 90° go toward 0 first
+                        scanDirection = (scanYawDeg >= 90.0) ? 1 : -1;
                         scanDwelling = true;
                         scanStepTime = now;
                         detector.reinitBGS();
-                        std::cout << "[SCAN] Starting scan at " << scanYawDeg << " deg" << std::endl;
+                        std::cout << "[SCAN] Starting scan at " << scanYawDeg
+                                  << " deg (dir=" << scanDirection << ")" << std::endl;
                     }
 
                     // Dwell timeout — move to next step

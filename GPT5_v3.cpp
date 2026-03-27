@@ -501,32 +501,10 @@ static void shutdownSysfsPwm() {
 // Кэшируем последнее записанное duty_cycle чтобы не писать в sysfs повторно
 static long lastDuty[4] = {0, 0, 0, 0};
 
-// Компенсация люфта (backlash) серво: при смене направления добавляем BACKLASH_DEG
-// чтобы выбрать механический зазор. Без этого люфт 5° вызывает «мёртвую зону»
-// при реверсе и осцилляцию трекинга.
-constexpr float BACKLASH_DEG = 5.0f;
-static float lastAngle[4] = {90.0f, 90.0f, 90.0f, 90.0f};
-static int lastDir[4] = {0, 0, 0, 0};  // -1 = decreasing, +1 = increasing, 0 = unknown
-
 void setServoAngle(int channel, float angle_deg)
 {
     if(angle_deg < 0.0f) angle_deg = 0.0f;
     if(angle_deg > 180.0f) angle_deg = 180.0f;
-
-    // === BACKLASH COMPENSATION ===
-    if (channel >= 0 && channel < 4) {
-        float delta = angle_deg - lastAngle[channel];
-        int newDir = (delta > 0.1f) ? 1 : (delta < -0.1f) ? -1 : lastDir[channel];
-        if (newDir != 0 && lastDir[channel] != 0 && newDir != lastDir[channel]) {
-            // Direction reversed — overshoot by BACKLASH_DEG to take up the slack
-            float compensated = angle_deg + newDir * BACKLASH_DEG;
-            if (compensated < 0.0f) compensated = 0.0f;
-            if (compensated > 180.0f) compensated = 180.0f;
-            angle_deg = compensated;
-        }
-        lastAngle[channel] = angle_deg;
-        if (newDir != 0) lastDir[channel] = newDir;
-    }
 
     const long duty_cycle_ns = min_ns + static_cast<long>((angle_deg / 180.0f) * (max_ns - min_ns));
 

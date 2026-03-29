@@ -596,7 +596,7 @@ public:
     }
     void resetConsecutive() { consecutiveDetections_ = 0; }
 
-    Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
+    Detection detect(cv::Mat &roi, int ox, int oy, double forcedLR = 0.0)
     {
         const int MIN_DETECTIONS = 1;
         const int MAX_MISSES = 15;
@@ -655,7 +655,9 @@ public:
         // === ADAPTIVE MOG2 LEARNING RATE ===
         // Proportional to camera motion — even slow servo tracking needs faster absorption
         double lr;
-        if (flowMag > 15.0f) {
+        if (forcedLR > 0.0) {
+            lr = forcedLR;          // Servo-settle override: quickly absorb new background
+        } else if (flowMag > 15.0f) {
             lr = 0.05;              // Large camera motion
             framesSinceMotion_ = 0;
         } else if (flowMag > 2.0f) {
@@ -1530,7 +1532,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         const int DET_W = 480, DET_H = 270;
         cv::resize(f.frame, resized, cv::Size(DET_W, DET_H), 0, 0, cv::INTER_LINEAR);
 
-        Detection d = detector.detect(resized, 0, 0);
+        // Servo-settle: force fast MOG2 learning after servo correction
+        static int servoSettleCounter = 0;
+        double forcedLR = (servoSettleCounter > 0) ? 0.5 : 0.0;
+        Detection d = detector.detect(resized, 0, 0, forcedLR);
 
         // Noise gate: too many objects = MOG2 noise burst
         if ((int)d.all_boxes.size() > 5) {
@@ -1680,17 +1685,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             noDetectionSince = std::chrono::steady_clock::now();
         }
 
-        // === 9+10. SERVO CONTROL — incremental P-regulator ===
-        // Only correct when scene is clean (fg < 500) to break servo→noise→servo cycle.
+        // === 9+10. SERVO CONTROL — move-and-settle P-regulator ===
+        // After each correction, wait SETTLE_FRAMES for MOG2 to absorb new background
+        // (lr=0.5 during settle). This breaks the servo→noise→servo feedback loop.
+        const int SERVO_SETTLE_FRAMES = 3;
         if (currentTrackingEnabled && !scanActive && d.valid
-            && detector.lastFGPixels() < 500) {
+            && detector.lastFGPixels() < 300
+            && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            double corrYaw   = -ex * DEG_PER_PX * 0.5;    // 50% of full correction
+            double corrYaw   = -ex * DEG_PER_PX * 0.5;
             double corrPitch = -ey * DEG_PER_PX * 0.5;
-            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);  // max 1.5° per frame (~25°/s)
-            corrPitch = std::clamp(corrPitch, -1.5, 1.5);
+            corrYaw   = std::clamp(corrYaw,   -3.0, 3.0);  // 3° per correction, ~13°/s effective
+            corrPitch = std::clamp(corrPitch, -3.0, 3.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
@@ -1698,7 +1706,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
+            servoSettleCounter = SERVO_SETTLE_FRAMES;  // pause for MOG2 to settle
         }
+        if (servoSettleCounter > 0) servoSettleCounter--;
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);

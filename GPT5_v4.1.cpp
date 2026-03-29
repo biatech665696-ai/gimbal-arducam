@@ -596,11 +596,11 @@ public:
             kf_.measurementMatrix.at<double>(1, 1) = 1.0;
 
             // Process noise — tuned for ~20fps object tracking
-            // Higher Q = trust measurements more (faster response, more noise)
-            // Lower Q  = smoother but laggier
-            cv::setIdentity(kf_.processNoiseCov, cv::Scalar(500.0));
+            // Q=100: moderate smoothing — filters centroid jitter but
+            // still tracks a moving object without excessive lag
+            cv::setIdentity(kf_.processNoiseCov, cv::Scalar(100.0));
             // Measurement noise — MOG2 centroid jitter ~10-20px std
-            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(150.0));
+            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(300.0));
 
             cv::setIdentity(kf_.errorCovPost, cv::Scalar(1000.0));
 
@@ -713,6 +713,8 @@ public:
         , prevRawFG_(0)
         , cooldownFrames_(0)
         , postCooldownLR_(0)
+        , cumulativeFlowX_(0)
+        , cumulativeFlowY_(0)
     {
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
@@ -732,6 +734,8 @@ public:
         prevRawFG_ = 0;
         cooldownFrames_ = 0;
         postCooldownLR_ = 0;
+        cumulativeFlowX_ = 0;
+        cumulativeFlowY_ = 0;
     }
     void resetCounters()
     {
@@ -800,37 +804,43 @@ public:
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === FRAME STABILIZATION ===
-        // Warp current frame into previous frame's coordinate system so MOG2
-        // sees a stabilized background.  Only the moving object remains as FG.
-        // This eliminates the need for FG-gate / cooldown frame skipping.
+        // === FRAME STABILIZATION (leaky accumulator) ===
+        // Accumulate camera motion with decay. At steady state, the warped
+        // frame perfectly tracks MOG2's model → zero background drift.
+        // Decay controls convergence: 0.85 = steady state in ~7 frames,
+        // max accumulated offset ~22px at 3.3px/frame flow.
+        const float DECAY = 0.85f;
+        cumulativeFlowX_ = DECAY * cumulativeFlowX_ + lastGlobalFlow_.x;
+        cumulativeFlowY_ = DECAY * cumulativeFlowY_ + lastGlobalFlow_.y;
+
         cv::Mat stableGray = gray;  // default: no warp
         warpApplied_ = false;
-        if (!lastAffine.empty() && flowMag > 0.3f) {
-            // Invert: map current pixels back to where they were in previous frame
-            cv::Mat invAffine;
-            cv::invertAffineTransform(lastAffine, invAffine);
-            cv::warpAffine(gray, stableGray, invAffine, gray.size(),
+        float cumMag = std::sqrt(cumulativeFlowX_ * cumulativeFlowX_ +
+                                  cumulativeFlowY_ * cumulativeFlowY_);
+        if (cumMag > 0.5f) {
+            // Pure translation warp (servo motion is mostly translation at small angles)
+            cv::Mat warpMat = (cv::Mat_<double>(2, 3) <<
+                1, 0, -(double)cumulativeFlowX_,
+                0, 1, -(double)cumulativeFlowY_);
+            cv::warpAffine(gray, stableGray, warpMat, gray.size(),
                            cv::INTER_LINEAR, cv::BORDER_REPLICATE);
             warpApplied_ = true;
-            warpFlow_ = lastGlobalFlow_;  // save for coordinate correction
+            warpFlow_ = cv::Point2f(cumulativeFlowX_, cumulativeFlowY_);
         }
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // With frame stabilization, camera motion is mostly compensated.
-        // Moderate LR keeps MOG2 responsive without eating the object too fast.
+        // With leaky-accumulator stabilization, at steady state MOG2 sees
+        // zero background drift. LR can stay low like FIXED mode.
+        // Only during transients (motion start/stop) use slightly higher LR.
         double lr;
         if (prevRawFG_ > 5000 && flowMag < 1.0f) {
-            lr = 0.25;              // Auto-exposure spike: absorb brightness change
-            framesSinceMotion_ = 0;
-        } else if (flowMag > 3.0f) {
-            lr = 0.15;              // Large motion residual: faster learn
-            framesSinceMotion_ = 0;
-        } else if (framesSinceMotion_ < 2) {
-            lr = 0.08;              // Brief post-motion transition
-            framesSinceMotion_++;
+            lr = 0.25;              // Auto-exposure spike
+        } else if (flowMag > 2.0f && rawFGTransient_ < 5) {
+            lr = 0.05;              // Motion transient: brief faster learning
+            rawFGTransient_++;
         } else {
-            lr = 0.008;             // Stable: moderate learning
+            lr = 0.008;             // Same as FIXED mode
+            if (flowMag < 0.5f) rawFGTransient_ = 0;
         }
 
         // === MOG2 FOREGROUND DETECTION (on stabilized frame) ===
@@ -983,8 +993,11 @@ private:
     int prevRawFG_;
     int cooldownFrames_;  // frames since last FG gate/noise gate
     int postCooldownLR_;  // frames of elevated LR after cooldown ends
-    bool warpApplied_ = false;  // true if stabilization warp was applied this frame
-    cv::Point2f warpFlow_{0, 0};  // flow used for warp (for coordinate correction)
+    float cumulativeFlowX_;  // leaky accumulator X
+    float cumulativeFlowY_;  // leaky accumulator Y
+    int rawFGTransient_ = 0; // frames since motion transient started
+    bool warpApplied_ = false;
+    cv::Point2f warpFlow_{0, 0};  // cumulative flow used for warp
 public:
     bool wasWarpApplied() const { return warpApplied_; }
     cv::Point2f warpFlowUsed() const { return warpFlow_; }
@@ -1254,7 +1267,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.25;  // smoothing factor per 10ms step
+    const double ALPHA = 0.35;  // smoothing factor per 10ms step (faster: Kalman provides smooth target)
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1313,6 +1326,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     // Kalman filter for smoothing noisy detection coordinates
     TrackingKalman trackKalman;
     auto lastDetTime = std::chrono::steady_clock::now();
+    int missedFrames = 0;  // consecutive frames without detection
 
     // Для визуализации
     cv::Rect lastROI;
@@ -1349,6 +1363,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (modeJustChanged && currentTrackingEnabled) {
             detector.reinitBGS();
             trackKalman.reset();
+            missedFrames = 0;
         }
 
         // === FRAME PREPARATION ===
@@ -1397,11 +1412,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         lastDetTime = nowTime;
 
         if (d.valid) {
-            // Update Kalman with measurement + predict 80ms ahead for servo lead
-            trackKalman.update(d.x, d.y, frameDt, 0.08);
+            // Update Kalman with measurement + predict 120ms ahead for servo lead
+            trackKalman.update(d.x, d.y, frameDt, 0.12);
+            missedFrames = 0;
         } else {
             // No detection: let Kalman coast (predict-only, no correction)
             trackKalman.coast(frameDt);
+            missedFrames++;
         }
 
         double yawDeg = lastYawDeg;
@@ -1484,8 +1501,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             noDetectionSince = std::chrono::steady_clock::now();
         }
 
-        if (d.valid && currentTrackingEnabled && !scanActive) {
-            // Use Kalman-filtered coordinates (already includes lead prediction)
+        // === SERVO CONTROL ===
+        // Drive servo from Kalman EVERY frame. When detection is valid,
+        // Kalman is corrected. When not, it coasts on predicted velocity.
+        // This gives continuous smooth motion even during detection gaps.
+        // Stop coasting after too many missed frames to prevent drift.
+        if (currentTrackingEnabled && !scanActive && trackKalman.isInitialized()
+            && missedFrames < 15) {
             double ex = trackKalman.x() - cx;
             double ey = trackKalman.y() - cy;
 
@@ -1494,19 +1516,18 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // Deadzone: don't move servo for tiny errors (noise region)
-            const double DEADZONE_PX = 8.0;
-            if (std::abs(ex) < DEADZONE_PX) ex = 0.0;
-            if (std::abs(ey) < DEADZONE_PX) ey = 0.0;
+            // Smooth attenuation near center (replaces hard deadzone)
+            // Quadratic ramp: gain = min(1, (dist/RAMP)^2)
+            // At 5px: gain=0.04, at 15px: gain=0.36, at 25px+: gain=1.0
+            const double RAMP_PX = 25.0;
+            double dist = std::sqrt(ex * ex + ey * ey);
+            double gain = std::min(1.0, (dist / RAMP_PX) * (dist / RAMP_PX));
+            ex *= gain;
+            ey *= gain;
 
-            // Simple P-controller: Kalman already filters noise, no D-term needed
+            // P-controller: Kalman provides smooth input, no slew limiter needed
             double stepYaw   = DEG_PER_PX * ex;
             double stepPitch = DEG_PER_PX * ey;
-
-            // Slew rate limiter: max 1.5 deg/frame (~30°/s at 20fps)
-            const double MAX_STEP_DEG = 1.5;
-            stepYaw   = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepYaw));
-            stepPitch = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepPitch));
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;
@@ -1522,8 +1543,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             servoTargetPitch.store(pitchDeg);
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
-
-            // Без settle: OF компенсирует движение камеры
         }
 
         // ROI для визуализации

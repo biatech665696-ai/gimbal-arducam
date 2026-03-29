@@ -553,7 +553,7 @@ class MotionDetector
 {
 public:
     MotionDetector()
-        : mog2_(cv::createBackgroundSubtractorMOG2(500, 30.0, false))
+        : mog2_(cv::createBackgroundSubtractorMOG2(500, 45.0, true))
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
@@ -578,7 +578,7 @@ public:
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
     void reinitBGS() {
-        mog2_ = cv::createBackgroundSubtractorMOG2(500, 30.0, false);
+        mog2_ = cv::createBackgroundSubtractorMOG2(500, 45.0, true);
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
         mog2_->setBackgroundRatio(0.9);
@@ -611,7 +611,7 @@ public:
         else
             gray = roi.clone();
 
-        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.2);
+        cv::GaussianBlur(gray, gray, cv::Size(5, 5), 1.5);
 
         // === CAMERA MOTION ESTIMATION (sparse LK + affine) ===
         lastGlobalFlow_ = cv::Point2f(0, 0);
@@ -689,7 +689,8 @@ public:
             return d;
         }
 
-        // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
+        // Morphology: OPEN removes 1-pixel noise, CLOSE connects nearby fragments
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN, kernel2_);
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
@@ -729,11 +730,11 @@ public:
             }
 
             if (!atEdge &&
-                area >= 3.0 && area <= 1500.0 &&
-                solidity > 0.2 &&
+                area >= 8.0 && area <= 800.0 &&
+                solidity > 0.25 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
-                bbox.width <= 100 && bbox.height <= 100 &&
-                aspectRatio > 0.12 && aspectRatio < 8.0) {
+                bbox.width <= 80 && bbox.height <= 80 &&
+                aspectRatio > 0.15 && aspectRatio < 7.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
                 validObjects.push_back(std::make_pair(area, (int)i));

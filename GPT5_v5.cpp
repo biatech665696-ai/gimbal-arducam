@@ -1772,16 +1772,33 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
-        // Return-to-center when completely lost (prevents stuck at extreme angles)
-        if (currentTrackingEnabled && !scanActive && framesWithoutDetection > 90) {
-            // Slowly return to 90°,90° at 0.3°/frame
-            double retYaw = lastYawDeg + std::clamp(90.0 - lastYawDeg, -0.3, 0.3);
-            double retPitch = lastPitchDeg + std::clamp(90.0 - lastPitchDeg, -0.3, 0.3);
-            if (std::abs(retYaw - lastYawDeg) > 0.01 || std::abs(retPitch - lastPitchDeg) > 0.01) {
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(retYaw));
-                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(retPitch));
-                lastYawDeg = retYaw;
-                lastPitchDeg = retPitch;
+        // Coast servo along predicted trajectory when object is lost
+        // Uses last known velocity to extrapolate where object should be.
+        static double coastVxDeg = 0, coastVyDeg = 0;  // velocity in deg/frame at time of loss
+        if (currentTrackingEnabled && !scanActive) {
+            if (d.valid && state.confidence >= 0.5) {
+                // Save velocity for coast prediction (px/frame → deg/frame)
+                const double DPP = 72.0 / 1920.0 * 1.05;
+                coastVxDeg = -state.vx * DPP / 17.0;  // vx is px/s, /17 → px/frame @17fps
+                coastVyDeg = -state.vy * DPP / 17.0;
+                // Clamp to reasonable coast speed
+                coastVxDeg = std::clamp(coastVxDeg, -1.0, 1.0);
+                coastVyDeg = std::clamp(coastVyDeg, -1.0, 1.0);
+            }
+            // Coast: continue moving servo along predicted trajectory
+            // Start after 15 frames (give detection a chance), decay velocity gradually
+            if (framesWithoutDetection > 15 && framesWithoutDetection < 120) {
+                double decay = std::max(0.0, 1.0 - (framesWithoutDetection - 15) / 105.0);
+                double cYaw  = coastVxDeg * decay;
+                double cPitch = coastVyDeg * decay;
+                if (std::abs(cYaw) > 0.01 || std::abs(cPitch) > 0.01) {
+                    double newYaw   = std::clamp(lastYawDeg + cYaw, 5.0, 175.0);
+                    double newPitch = std::clamp(lastPitchDeg + cPitch, 5.0, 175.0);
+                    setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(newYaw));
+                    setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(newPitch));
+                    lastYawDeg = newYaw;
+                    lastPitchDeg = newPitch;
+                }
             }
         }
 

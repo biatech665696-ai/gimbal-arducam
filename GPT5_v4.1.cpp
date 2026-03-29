@@ -1495,10 +1495,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // Deadzone: don't move servo for tiny errors (noise region)
-            const double DEADZONE_PX = 8.0;
-            if (std::abs(ex) < DEADZONE_PX) ex = 0.0;
-            if (std::abs(ey) < DEADZONE_PX) ey = 0.0;
+            // Soft deadzone: quadratic ramp instead of hard on/off
+            // gain = min(1, (dist/SOFT_RADIUS)²)
+            // 5px→6%, 10px→25%, 15px→56%, 20px+→100%
+            const double SOFT_RADIUS = 20.0;
+            double dist = std::sqrt(ex * ex + ey * ey);
+            double gain = std::min(1.0, (dist / SOFT_RADIUS) * (dist / SOFT_RADIUS));
+            ex *= gain;
+            ey *= gain;
 
             // Simple P-controller: Kalman already filters noise, no D-term needed
             double stepYaw   = DEG_PER_PX * ex;

@@ -1415,8 +1415,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            double stepYaw   = ex * DEG_PER_PX;
-            double stepPitch = ey * DEG_PER_PX;
+            // PD-controller: D-term damps oscillations near target
+            static double prevEx = 0.0, prevEy = 0.0;
+            static auto prevTime = std::chrono::steady_clock::now();
+            auto nowTime = std::chrono::steady_clock::now();
+            double dt = std::chrono::duration<double>(nowTime - prevTime).count();
+            if (dt < 0.001) dt = 0.001; // safety clamp
+
+            double Kp = DEG_PER_PX;
+            double Kd = 0.004;  // derivative gain (damps approach)
+
+            double dex = (ex - prevEx) / dt;
+            double dey = (ey - prevEy) / dt;
+
+            double stepYaw   = Kp * ex + Kd * dex;
+            double stepPitch = Kp * ey + Kd * dey;
+
+            prevEx = ex;
+            prevEy = ey;
+            prevTime = nowTime;
 
             // Slew rate limiter: max degrees per frame (~20fps → 16°/s)
             const double MAX_STEP_DEG = 0.8;

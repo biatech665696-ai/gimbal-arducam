@@ -1570,7 +1570,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
-        Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
+        // During servo settle: freeze MOG2 learning rate so camera motion
+        // doesn't absorb the object into the background model
+        double detectLR = (servoSettleCounter > 0) ? 0.001 : 0.0;
+        Detection d = detector.detect(resized, 0, 0, detectLR, searchPt, searchRad);
 
         // Noise gate: even with spatial filter, >5 objects means noise burst
         if ((int)d.all_boxes.size() > 5) {
@@ -1651,7 +1654,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                       predState.vx, predState.vy, state.confidence);
 
         // === 8. TRAJECTORY PREDICTION ===
-        predTrajectory = TrajectoryPredictor::predictTrajectory(predState, 0.033, 15);
+        // Only show prediction when tracker is confident; clear when object is lost
+        if (tracker.getMissCount() > 5) {
+            predTrajectory.clear();
+        } else {
+            predTrajectory = TrajectoryPredictor::predictTrajectory(predState, 0.033, 15);
+        }
 
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;

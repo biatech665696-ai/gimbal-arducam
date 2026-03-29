@@ -729,10 +729,10 @@ public:
             }
 
             if (!atEdge &&
-                area >= 3.0 && area <= 600.0 &&
+                area >= 3.0 && area <= 1000.0 &&
                 solidity > 0.25 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
-                bbox.width <= 60 && bbox.height <= 60 &&
+                bbox.width <= 80 && bbox.height <= 80 &&
                 aspectRatio > 0.15 && aspectRatio < 7.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
@@ -1576,25 +1576,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: even with spatial filter, >3 objects means noise burst
-        if ((int)d.all_boxes.size() > 3) {
+        // Noise gate: even with spatial filter, >4 objects means noise burst
+        if ((int)d.all_boxes.size() > 4) {
             d.valid = false;
             d.all_boxes.clear();
         }
 
-        // Jump check: reject if detection jumps > 50px in det coords from previous detection
-        // This catches noise contours popping up far from the real object
-        if (d.valid && prevDetX >= 0) {
+        // Jump check: reject if detection jumps > 40px in det coords from previous
+        // Only when prevDet is fresh (< 5 frames ago) to avoid stale anchors
+        static int framesSincePrevDet = 999;
+        if (d.valid && prevDetX >= 0 && framesSincePrevDet < 5) {
             double detJumpX = d.x - prevDetX;
             double detJumpY = d.y - prevDetY;
             double detJump = std::sqrt(detJumpX * detJumpX + detJumpY * detJumpY);
-            if (detJump > 50.0) {
+            if (detJump > 40.0) {
                 d.valid = false;  // Too far from previous detection = noise
             }
         }
         if (d.valid) {
             prevDetX = d.x;
             prevDetY = d.y;
+            framesSincePrevDet = 0;
+        } else {
+            framesSincePrevDet++;
         }
 
         // Scale back: detection coords (480x270) → full-frame coords

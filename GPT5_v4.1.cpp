@@ -704,6 +704,8 @@ public:
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
         , prevValidCenter_(-1, -1)
+        , candidateCenter_(-1, -1)
+        , candidateCount_(0)
         , consecutiveDetections_(0)
         , consecutiveMisses_(0)
         , lastFGPixels_(0)
@@ -737,6 +739,8 @@ public:
     {
         consecutiveDetections_ = 0;
         consecutiveMisses_ = 0;
+        candidateCount_ = 0;
+        candidateCenter_ = cv::Point2f(-1, -1);
         lastValidCenter_ = cv::Point2f(-1, -1);
         reinitBGS();
     }
@@ -744,8 +748,8 @@ public:
 
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
-        const int MIN_DETECTIONS = 1;
-        const int MAX_MISSES = 60;
+        const int MIN_DETECTIONS = 3;   // require 3 consecutive near-detections before accepting
+        const int MAX_MISSES = 40;      // lose target after ~2s without detection
 
         Detection d;
         d.valid = false;
@@ -925,21 +929,39 @@ public:
 
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
-                    if (distance < 120.0) {  // at 0.25x = 480px full-res (relaxed from 80)
-                        // Accept detection near previous position
+                    if (distance < 80.0) {
+                        // Near previous position — accept as same target
                         foundCandidate = true;
                         consecutiveDetections_++;
                         consecutiveMisses_ = 0;
+                        candidateCount_ = 0;  // reset candidate when tracking is stable
+                    } else if (distance < 200.0) {
+                        // Medium jump — could be real movement, start confirmation
+                        candidateCenter_ = currentCenter;
+                        candidateCount_++;
+                        // Only switch after 3 consecutive frames near candidate
+                        if (candidateCount_ >= 3) {
+                            lastValidCenter_ = candidateCenter_;
+                            consecutiveDetections_ = 3;
+                            consecutiveMisses_ = 0;
+                            foundCandidate = true;
+                            candidateCount_ = 0;
+                        }
+                        // Don't accept yet — servo stays put
                     } else {
-                        // Far jump — reset anchor but don't penalize
-                        consecutiveDetections_ = 1;
-                        lastValidCenter_ = currentCenter;
-                        foundCandidate = true;
+                        // Far jump (>200px) — almost certainly noise, ignore completely
+                        candidateCount_ = 0;
                     }
                 } else {
-                    foundCandidate = true;
-                    consecutiveDetections_ = 1;
-                    lastValidCenter_ = currentCenter;
+                    // No anchor yet — start building one
+                    candidateCenter_ = currentCenter;
+                    candidateCount_++;
+                    if (candidateCount_ >= 3) {
+                        foundCandidate = true;
+                        consecutiveDetections_ = 3;
+                        lastValidCenter_ = currentCenter;
+                        candidateCount_ = 0;
+                    }
                 }
 
                 if (foundCandidate && consecutiveDetections_ >= MIN_DETECTIONS) {
@@ -974,6 +996,8 @@ private:
     cv::Mat prevGray_;    // uint8, for LK tracking
     cv::Point2f lastValidCenter_;
     cv::Point2f prevValidCenter_;  // one before lastValidCenter_ for direction check
+    cv::Point2f candidateCenter_;  // new target candidate being confirmed
+    int candidateCount_;           // consecutive frames candidate detected nearby
     int consecutiveDetections_;
     int consecutiveMisses_;
     int lastFGPixels_;

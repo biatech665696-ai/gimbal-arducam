@@ -599,7 +599,7 @@ public:
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
         const int MIN_DETECTIONS = 1;
-        const int MAX_MISSES = 60;
+        const int MAX_MISSES = 15;
 
         Detection d;
         d.valid = false;
@@ -657,10 +657,10 @@ public:
         // Auto-exposure spike (high fg, no flow) → medium LR to absorb brightness shift
         // Camera stable → low LR: object stays foreground for detection
         double lr;
-        if (flowMag > 5.0f) {
+        if (flowMag > 20.0f) {
             lr = 0.5;               // Camera motion: fast absorb new bg
             framesSinceMotion_ = 0;
-        } else if (prevRawFG_ > 15000 && flowMag < 2.0f) {
+        } else if (prevRawFG_ > 50000 && flowMag < 10.0f) {
             lr = 0.3;               // Auto-exposure spike: absorb brightness change
         } else if (framesSinceMotion_ < 3) {
             lr = 0.2;               // Post-motion transition
@@ -687,7 +687,7 @@ public:
         // === FG PIXEL GATE ===
         // High fg = camera shift noise. Reset consecutive to prevent
         // noise carry-over to first clean frame.
-        if (rawFG > 15000) {
+        if (rawFG > 50000) {
             lastRawContours_ = 0;
             consecutiveDetections_ = 0;
             cooldownFrames_ = 2;  // require 2 clean frames after noise (adaptive exit)
@@ -695,15 +695,15 @@ public:
         }
 
         // === OF VALIDATION ===
-        // Camera still moving (flow>5.0) but FG below gate → residual noise
-        if (flowMag > 5.0f) {
+        // Camera still moving (flow>20) but FG below gate → residual noise
+        if (flowMag > 20.0f) {
             consecutiveDetections_ = 0;
             cooldownFrames_ = std::max(cooldownFrames_, 2);
         }
 
         // === COOLDOWN (adaptive: exit early when FG settles) ===
         if (cooldownFrames_ > 0) {
-            if (rawFG < 5000 && flowMag < 3.0f) {
+            if (rawFG < 10000 && flowMag < 10.0f) {
                 cooldownFrames_ = 0;  // FG settled, end cooldown early
                 postCooldownLR_ = 3;  // boost LR to absorb residuals
                 // Don't reset consecutive — scene is clean, allow immediate detection
@@ -778,7 +778,7 @@ public:
 
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
-                    if (distance < 80.0) {  // at 0.25x = 320px full-res
+                    if (distance < 200.0) {  // allow larger jumps for intermittent detections
                         // Direction check: reject if moving back toward previous position
                         // (MOG2 ghost at t-1 position looks like a valid nearby detection)
                         bool directionOK = true;
@@ -1011,7 +1011,7 @@ public:
 
 private:
     void recompute() {
-        if (!initialized_ || framesSinceDetection_ > 45) {
+        if (!initialized_ || framesSinceDetection_ > 15) {
             roiX_ = 0; roiY_ = 0; roiW_ = frameW_; roiH_ = frameH_;
             return;
         }
@@ -1675,7 +1675,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 4 (cont). UPDATE DYNAMIC ROI ===
-        dynROI.update(d.valid || tracker.getMissCount() < 10,
+        dynROI.update(d.valid,
                       state.x, state.y,
                       d.valid ? d.box_w : 0, d.valid ? d.box_h : 0,
                       predState.vx, predState.vy, state.confidence);

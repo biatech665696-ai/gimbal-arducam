@@ -1553,23 +1553,27 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::resize(f.frame, resized, cv::Size(DET_W, DET_H), 0, 0, cv::INTER_LINEAR);
 
         // Spatial gating: search near last known position instead of full frame
-        // searchRad=60px in detection space ≈ 240px in full-frame — enough for 2° servo correction
+        // Adaptive radius: tight when noisy (camera moving), wide when clean
         static int servoSettleCounter = 0;
         static double lastKnownX = -1, lastKnownY = -1;
+        static int consecutiveValid = 0;  // for servo correction gating
+        static int framesWithoutDetection = 0;  // for return-to-center
         if (resetSpatialGating) {
             lastKnownX = -1; lastKnownY = -1;
             servoSettleCounter = 0;
+            consecutiveValid = 0;
+            framesWithoutDetection = 0;
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 60.0f;
+        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: too many objects near search center = real noise
-        if ((int)d.all_boxes.size() > 8) {
+        // Noise gate: even with spatial filter, >5 objects means noise burst
+        if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
         }
@@ -1714,6 +1718,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             noDetectionSince = std::chrono::steady_clock::now();
         }
 
+        // Track consecutive valid detections for servo stability
+        if (d.valid) {
+            consecutiveValid++;
+            framesWithoutDetection = 0;
+        } else {
+            consecutiveValid = 0;
+            framesWithoutDetection++;
+        }
+
         // Update last known position for spatial gating on next frame
         // Only anchor to position once tracker has confidence (avoids chasing noise)
         if (d.valid && state.confidence > 0.3) {
@@ -1733,19 +1746,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — P-regulator with settle ===
-        // Only move servo when tracker has established confidence (avoids chasing noise).
-        const int SERVO_SETTLE_FRAMES = 2;
+        // === 9+10. SERVO CONTROL — cautious P-regulator ===
+        // Require 3 consecutive valid detections + conf >= 0.5 before moving.
+        // This prevents noise bursts from causing servo drift.
+        const int SERVO_SETTLE_FRAMES = 3;
         if (currentTrackingEnabled && !scanActive && d.valid
+            && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            double corrYaw   = -ex * DEG_PER_PX * 0.5;
-            double corrPitch = -ey * DEG_PER_PX * 0.5;
-            corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);  // 2°/correction, ~15°/s effective
-            corrPitch = std::clamp(corrPitch, -2.0, 2.0);
+            double corrYaw   = -ex * DEG_PER_PX * 0.35;  // 35% correction (was 50%)
+            double corrPitch = -ey * DEG_PER_PX * 0.35;
+            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);  // 1.5°/correction
+            corrPitch = std::clamp(corrPitch, -1.5, 1.5);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
@@ -1756,6 +1771,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             servoSettleCounter = SERVO_SETTLE_FRAMES;
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
+
+        // Return-to-center when completely lost (prevents stuck at extreme angles)
+        if (currentTrackingEnabled && !scanActive && framesWithoutDetection > 90) {
+            // Slowly return to 90°,90° at 0.3°/frame
+            double retYaw = lastYawDeg + std::clamp(90.0 - lastYawDeg, -0.3, 0.3);
+            double retPitch = lastPitchDeg + std::clamp(90.0 - lastPitchDeg, -0.3, 0.3);
+            if (std::abs(retYaw - lastYawDeg) > 0.01 || std::abs(retPitch - lastPitchDeg) > 0.01) {
+                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(retYaw));
+                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(retPitch));
+                lastYawDeg = retYaw;
+                lastPitchDeg = retPitch;
+            }
+        }
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);

@@ -600,7 +600,8 @@ public:
             // Lower Q  = smoother but laggier
             cv::setIdentity(kf_.processNoiseCov, cv::Scalar(500.0));
             // Measurement noise — MOG2 centroid jitter ~10-20px std
-            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(150.0));
+            // R=600: Q/R=0.83 → real smoothing of noisy centroid
+            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(600.0));
 
             cv::setIdentity(kf_.errorCovPost, cv::Scalar(1000.0));
 

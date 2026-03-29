@@ -596,7 +596,8 @@ public:
     }
     void resetConsecutive() { consecutiveDetections_ = 0; }
 
-    Detection detect(cv::Mat &roi, int ox, int oy, double forcedLR = 0.0)
+    Detection detect(cv::Mat &roi, int ox, int oy, double forcedLR = 0.0,
+                     cv::Point2f searchCenter = cv::Point2f(-1,-1), float searchRadius = 60.0f)
     {
         const int MIN_DETECTIONS = 1;
         const int MAX_MISSES = 15;
@@ -698,6 +699,12 @@ public:
         lastRawContours_ = (int)contours.size();
 
         // === ФИЛЬТРАЦИЯ КОНТУРОВ ===
+        // Determine search center: prefer external prediction, fallback to internal last position
+        cv::Point2f effectiveCenter = searchCenter;
+        if (effectiveCenter.x < 0 && lastValidCenter_.x >= 0)
+            effectiveCenter = lastValidCenter_;
+        bool hasSearchCenter = (effectiveCenter.x >= 0);
+
         std::vector<std::pair<double, int>> validObjects;
 
         for (size_t i = 0; i < contours.size(); i++) {
@@ -711,6 +718,15 @@ public:
             bool atEdge = (bbox.x <= EDGE_MARGIN || bbox.y <= EDGE_MARGIN ||
                           bbox.x + bbox.width >= roi.cols - EDGE_MARGIN ||
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
+
+            // Spatial proximity gate: when we know where to look, ignore far-away noise
+            if (hasSearchCenter) {
+                float cx_ = bbox.x + bbox.width * 0.5f;
+                float cy_ = bbox.y + bbox.height * 0.5f;
+                float dist = std::sqrt((cx_ - effectiveCenter.x) * (cx_ - effectiveCenter.x)
+                                     + (cy_ - effectiveCenter.y) * (cy_ - effectiveCenter.y));
+                if (dist > searchRadius) continue;
+            }
 
             if (!atEdge &&
                 area >= 3.0 && area <= 1500.0 &&
@@ -941,7 +957,7 @@ public:
     }
 
     cv::Rect getROI() const { return cv::Rect(roiX_, roiY_, roiW_, roiH_); }
-    bool isFullFrame() const { return !initialized_ || framesSinceDetection_ > 45; }
+    bool isFullFrame() const { return !initialized_ || framesSinceDetection_ > 60; }
     void setFrameSize(int w, int h) { frameW_ = w; frameH_ = h; }
 
     void reset() {
@@ -953,7 +969,7 @@ public:
 
 private:
     void recompute() {
-        if (!initialized_ || framesSinceDetection_ > 15) {
+        if (!initialized_ || framesSinceDetection_ > 30) {
             roiX_ = 0; roiY_ = 0; roiW_ = frameW_; roiH_ = frameH_;
             return;
         }
@@ -1507,6 +1523,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // При переключении FIXED → TRACKING: reset all components
+        static bool resetSpatialGating = false;
         if (modeJustChanged && currentTrackingEnabled) {
             detector.reinitBGS();
             multiScale.reinit();
@@ -1516,6 +1533,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             servoPitch.reset(lastPitchDeg);
             dynROI.reset();
             prevGrayFull = cv::Mat();
+            resetSpatialGating = true;
         }
 
         // === FRAME PREPARATION ===
@@ -1530,22 +1548,33 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // ROI crop caused model instability (different content → alternating fg).
         cv::Mat resized;
         const int DET_W = 480, DET_H = 270;
+        const double scX = (double)f.frame.cols / DET_W;
+        const double scY = (double)f.frame.rows / DET_H;
         cv::resize(f.frame, resized, cv::Size(DET_W, DET_H), 0, 0, cv::INTER_LINEAR);
 
-        // Servo-settle: force fast MOG2 learning after servo correction
+        // Spatial gating: search near last known position instead of full frame
+        // searchRad=60px in detection space ≈ 240px in full-frame — enough for 2° servo correction
         static int servoSettleCounter = 0;
-        double forcedLR = (servoSettleCounter > 0) ? 0.5 : 0.0;
-        Detection d = detector.detect(resized, 0, 0, forcedLR);
+        static double lastKnownX = -1, lastKnownY = -1;
+        if (resetSpatialGating) {
+            lastKnownX = -1; lastKnownY = -1;
+            servoSettleCounter = 0;
+            resetSpatialGating = false;
+        }
+        cv::Point2f searchPt(-1, -1);
+        float searchRad = 60.0f;
+        if (lastKnownX >= 0) {
+            searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
+        }
+        Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: too many objects = MOG2 noise burst
-        if ((int)d.all_boxes.size() > 5) {
+        // Noise gate: too many objects near search center = real noise
+        if ((int)d.all_boxes.size() > 8) {
             d.valid = false;
             d.all_boxes.clear();
         }
 
         // Scale back: detection coords (480x270) → full-frame coords
-        const double scX = (double)f.frame.cols / DET_W;
-        const double scY = (double)f.frame.rows / DET_H;
         if (d.valid) {
             d.x = d.x * scX;
             d.y = d.y * scY;
@@ -1685,20 +1714,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             noDetectionSince = std::chrono::steady_clock::now();
         }
 
-        // === 9+10. SERVO CONTROL — move-and-settle P-regulator ===
-        // After each correction, wait SETTLE_FRAMES for MOG2 to absorb new background
-        // (lr=0.5 during settle). This breaks the servo→noise→servo feedback loop.
-        const int SERVO_SETTLE_FRAMES = 3;
+        // Update last known position for spatial gating on next frame
+        if (d.valid) {
+            lastKnownX = d.x;
+            lastKnownY = d.y;
+        } else if (tracker.isInitialized() && state.confidence > 0.3) {
+            // Coast with Kalman prediction
+            lastKnownX = state.x;
+            lastKnownY = state.y;
+        }
+
+        // === 9+10. SERVO CONTROL — P-regulator with settle ===
+        // After correction, wait 2 frames for MOG2 to absorb camera shift.
+        // Spatial gating lets detection work even during high-fg frames.
+        const int SERVO_SETTLE_FRAMES = 2;
         if (currentTrackingEnabled && !scanActive && d.valid
-            && detector.lastFGPixels() < 300
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
             double corrYaw   = -ex * DEG_PER_PX * 0.5;
             double corrPitch = -ey * DEG_PER_PX * 0.5;
-            corrYaw   = std::clamp(corrYaw,   -3.0, 3.0);  // 3° per correction, ~13°/s effective
-            corrPitch = std::clamp(corrPitch, -3.0, 3.0);
+            corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);  // 2°/correction, ~15°/s effective
+            corrPitch = std::clamp(corrPitch, -2.0, 2.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
@@ -1706,7 +1744,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
-            servoSettleCounter = SERVO_SETTLE_FRAMES;  // pause for MOG2 to settle
+            servoSettleCounter = SERVO_SETTLE_FRAMES;
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

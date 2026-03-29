@@ -600,8 +600,7 @@ public:
             // Lower Q  = smoother but laggier
             cv::setIdentity(kf_.processNoiseCov, cv::Scalar(500.0));
             // Measurement noise — MOG2 centroid jitter ~10-20px std
-            // R=600: Q/R=0.83 → real smoothing of noisy centroid
-            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(600.0));
+            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(150.0));
 
             cv::setIdentity(kf_.errorCovPost, cv::Scalar(1000.0));
 
@@ -1318,6 +1317,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     // Для визуализации
     cv::Rect lastROI;
 
+    // === DIAGNOSTIC LOG ===
+    FILE* diagLog = fopen("/tmp/servo_diag.csv", "w");
+    if (diagLog) {
+        fprintf(diagLog, "frame,t_ms,valid,raw_x,raw_y,kal_x,kal_y,ex,ey,stepYaw,stepPitch,targetYaw,targetPitch\n");
+    }
+    int diagFrame = 0;
+    auto diagStart = std::chrono::steady_clock::now();
+
     while(run)
     {
         FrameData f;
@@ -1398,8 +1405,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         lastDetTime = nowTime;
 
         if (d.valid) {
-            // Update Kalman with measurement, no lead prediction (lead amplifies noise)
-            trackKalman.update(d.x, d.y, frameDt, 0.0);
+            // Update Kalman with measurement + predict 80ms ahead for servo lead
+            trackKalman.update(d.x, d.y, frameDt, 0.08);
         } else {
             // No detection: let Kalman coast (predict-only, no correction)
             trackKalman.coast(frameDt);
@@ -1495,21 +1502,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // Soft deadzone: quadratic ramp instead of hard on/off
-            // gain = min(1, (dist/SOFT_RADIUS)²)
-            // 5px→6%, 10px→25%, 15px→56%, 20px+→100%
-            const double SOFT_RADIUS = 20.0;
-            double dist = std::sqrt(ex * ex + ey * ey);
-            double gain = std::min(1.0, (dist / SOFT_RADIUS) * (dist / SOFT_RADIUS));
-            ex *= gain;
-            ey *= gain;
+            // Deadzone: don't move servo for tiny errors (noise region)
+            const double DEADZONE_PX = 8.0;
+            if (std::abs(ex) < DEADZONE_PX) ex = 0.0;
+            if (std::abs(ey) < DEADZONE_PX) ey = 0.0;
 
             // Simple P-controller: Kalman already filters noise, no D-term needed
             double stepYaw   = DEG_PER_PX * ex;
             double stepPitch = DEG_PER_PX * ey;
 
-            // Slew rate limiter: max 0.75 deg/frame (~15°/s at 20fps)
-            const double MAX_STEP_DEG = 0.75;
+            // Slew rate limiter: max 1.5 deg/frame (~30°/s at 20fps)
+            const double MAX_STEP_DEG = 1.5;
             stepYaw   = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepYaw));
             stepPitch = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepPitch));
 
@@ -1528,8 +1531,27 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
 
+            // Diagnostic log
+            if (diagLog) {
+                double t_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - diagStart).count();
+                fprintf(diagLog, "%d,%.1f,1,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.4f,%.4f,%.2f,%.2f\n",
+                    diagFrame, t_ms, d.x, d.y,
+                    trackKalman.x(), trackKalman.y(),
+                    ex, ey, stepYaw, stepPitch, yawDeg, pitchDeg);
+                if (diagFrame % 20 == 0) fflush(diagLog);
+            }
             // Без settle: OF компенсирует движение камеры
+        } else if (diagLog && currentTrackingEnabled && !scanActive) {
+            // Log frames where d.valid=false too
+            double t_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - diagStart).count();
+            fprintf(diagLog, "%d,%.1f,0,0,0,%.1f,%.1f,0,0,0,0,%.2f,%.2f\n",
+                diagFrame, t_ms,
+                trackKalman.x(), trackKalman.y(),
+                lastYawDeg, lastPitchDeg);
         }
+        diagFrame++;
 
         // ROI для визуализации
         if (d.valid) {
@@ -1737,6 +1759,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         
     }
+    // Close diagnostic log
+    if (diagLog) { fflush(diagLog); fclose(diagLog); }
 }
 
 /* =============== MAIN =============== */

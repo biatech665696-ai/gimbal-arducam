@@ -1138,7 +1138,7 @@ public:
                     initialized_ = true;
                 }
                 missCount_ = 0;
-                confidence_ = std::min(1.0, confidence_ + 0.15);
+                confidence_ = std::min(1.0, confidence_ + 0.35);
                 double v2 = kf_.statePost.at<double>(2) * kf_.statePost.at<double>(2)
                           + kf_.statePost.at<double>(3) * kf_.statePost.at<double>(3);
                 velocityVariance_ = 0.8 * velocityVariance_ + 0.2 * v2;
@@ -1749,19 +1749,35 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 9. PREDICTIVE GIMBAL CONTROL + 10. DUAL-LOOP SERVO ===
-        if (tracker.isInitialized() && currentTrackingEnabled && !scanActive
-            && tracker.getConfidence() > 0.1) {
-            auto cmd = gimbal.compute(predState, cx, cy, lastYawDeg, lastPitchDeg);
-            servoYaw.setTarget(cmd.yawDeg);
-            servoPitch.setTarget(cmd.pitchDeg);
-            double frameDt = 0.033;
-            yawDeg   = servoYaw.tick(frameDt);
-            pitchDeg = servoPitch.tick(frameDt);
+        if (currentTrackingEnabled && !scanActive) {
+            if (tracker.isInitialized() && tracker.getConfidence() > 0.01) {
+                // Predictive control via Kalman state
+                auto cmd = gimbal.compute(predState, cx, cy, lastYawDeg, lastPitchDeg);
+                servoYaw.setTarget(cmd.yawDeg);
+                servoPitch.setTarget(cmd.pitchDeg);
+                double frameDt = 0.033;
+                yawDeg   = servoYaw.tick(frameDt);
+                pitchDeg = servoPitch.tick(frameDt);
 
-            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-            lastYawDeg = yawDeg;
-            lastPitchDeg = pitchDeg;
+                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+                lastYawDeg = yawDeg;
+                lastPitchDeg = pitchDeg;
+            } else if (d.valid) {
+                // Direct P-regulator fallback when tracker not ready
+                double ex = d.x - cx;
+                double ey = d.y - cy;
+                const double DEG_PER_PX_DIRECT = 72.0 / 1920.0 * 1.05;
+                yawDeg   = std::clamp(lastYawDeg   - ex * DEG_PER_PX_DIRECT, 5.0, 175.0);
+                pitchDeg = std::clamp(lastPitchDeg - ey * DEG_PER_PX_DIRECT, 5.0, 175.0);
+
+                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+                servoYaw.reset(yawDeg);
+                servoPitch.reset(pitchDeg);
+                lastYawDeg = yawDeg;
+                lastPitchDeg = pitchDeg;
+            }
         }
 
         // ROI для визуализации

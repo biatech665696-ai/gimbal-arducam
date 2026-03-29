@@ -653,16 +653,19 @@ public:
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Gentle adaptation — never spike high enough to absorb real objects
+        // Proportional to camera motion — even slow servo tracking needs faster absorption
         double lr;
-        if (flowMag > 20.0f) {
-            lr = 0.03;              // Camera/servo motion: gentle absorb
+        if (flowMag > 15.0f) {
+            lr = 0.05;              // Large camera motion
             framesSinceMotion_ = 0;
-        } else if (framesSinceMotion_ < 3) {
-            lr = 0.015;             // Post-motion transition
+        } else if (flowMag > 2.0f) {
+            lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
+            framesSinceMotion_ = 0;
+        } else if (framesSinceMotion_ < 5) {
+            lr = 0.01;              // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.005;             // Stable: slow learning, object stays fg
+            lr = 0.003;             // Fully stable: object stays foreground
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -1529,8 +1532,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         Detection d = detector.detect(resized, 0, 0);
 
-        // Noise gate: too many objects = global MOG2 noise burst
-        if ((int)d.all_boxes.size() > 50) {
+        // Noise gate: too many objects = MOG2 noise burst
+        if ((int)d.all_boxes.size() > 15) {
             d.valid = false;
             d.all_boxes.clear();
         }

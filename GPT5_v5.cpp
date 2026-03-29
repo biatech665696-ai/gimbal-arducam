@@ -729,11 +729,11 @@ public:
             }
 
             if (!atEdge &&
-                area >= 3.0 && area <= 1000.0 &&
-                solidity > 0.25 &&
+                area >= 3.0 && area <= 1500.0 &&
+                solidity > 0.2 &&
                 bbox.width >= 2 && bbox.height >= 2 &&
-                bbox.width <= 80 && bbox.height <= 80 &&
-                aspectRatio > 0.15 && aspectRatio < 7.0) {
+                bbox.width <= 100 && bbox.height <= 100 &&
+                aspectRatio > 0.12 && aspectRatio < 8.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
                 validObjects.push_back(std::make_pair(area, (int)i));
@@ -1556,49 +1556,26 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Adaptive radius: tight when noisy (camera moving), wide when clean
         static int servoSettleCounter = 0;
         static double lastKnownX = -1, lastKnownY = -1;
-        static double prevDetX = -1, prevDetY = -1;  // previous detection in det coords for jump check
         static int consecutiveValid = 0;  // for servo correction gating
-        static int framesWithoutDetection = 0;  // for coast prediction
-        static bool reacquiring = false;  // after spatial reset, need more consecutive
+        static int framesWithoutDetection = 0;  // for return-to-center
         if (resetSpatialGating) {
             lastKnownX = -1; lastKnownY = -1;
-            prevDetX = -1; prevDetY = -1;
             servoSettleCounter = 0;
             consecutiveValid = 0;
             framesWithoutDetection = 0;
-            reacquiring = true;
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 25.0f;  // 25px in det space = 100px full-frame — tight
+        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: even with spatial filter, >4 objects means noise burst
-        if ((int)d.all_boxes.size() > 4) {
+        // Noise gate: even with spatial filter, >5 objects means noise burst
+        if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
-        }
-
-        // Jump check: reject if detection jumps > 40px in det coords from previous
-        // Only when prevDet is fresh (< 5 frames ago) to avoid stale anchors
-        static int framesSincePrevDet = 999;
-        if (d.valid && prevDetX >= 0 && framesSincePrevDet < 5) {
-            double detJumpX = d.x - prevDetX;
-            double detJumpY = d.y - prevDetY;
-            double detJump = std::sqrt(detJumpX * detJumpX + detJumpY * detJumpY);
-            if (detJump > 40.0) {
-                d.valid = false;  // Too far from previous detection = noise
-            }
-        }
-        if (d.valid) {
-            prevDetX = d.x;
-            prevDetY = d.y;
-            framesSincePrevDet = 0;
-        } else {
-            framesSincePrevDet++;
         }
 
         // Scale back: detection coords (480x270) → full-frame coords
@@ -1752,38 +1729,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // Update last known position for spatial gating on next frame
         // Only anchor to position once tracker has confidence (avoids chasing noise)
-        if (d.valid && state.confidence > 0.5) {
+        if (d.valid && state.confidence > 0.3) {
             lastKnownX = d.x;
             lastKnownY = d.y;
-            if (reacquiring && consecutiveValid >= 5)
-                reacquiring = false;  // established track
-        } else if (d.valid && state.confidence > 0.3 && !reacquiring) {
+        } else if (d.valid && lastKnownX < 0) {
+            // First detection ever — allow anchoring to bootstrap tracking
             lastKnownX = d.x;
             lastKnownY = d.y;
-        } else if (d.valid && lastKnownX < 0 && consecutiveValid >= 2) {
-            // Bootstrap: require at least 2 consecutive detections to anchor
-            lastKnownX = d.x;
-            lastKnownY = d.y;
-        } else if (tracker.isInitialized() && state.confidence > 0.3 && !reacquiring) {
+        } else if (tracker.isInitialized() && state.confidence > 0.3) {
             // Coast with Kalman prediction
             lastKnownX = state.x;
             lastKnownY = state.y;
-        } else if (tracker.getMissCount() > 45) {
+        } else if (tracker.getMissCount() > 30) {
             // Lost object completely — reset spatial gating, allow full-frame search
             lastKnownX = -1;
             lastKnownY = -1;
-            prevDetX = -1;
-            prevDetY = -1;
-            reacquiring = true;
         }
 
         // === 9+10. SERVO CONTROL — cautious P-regulator ===
-        // After re-acquisition, require 5 consecutive; normal tracking requires 3.
+        // Require 3 consecutive valid detections + conf >= 0.5 before moving.
         // This prevents noise bursts from causing servo drift.
         const int SERVO_SETTLE_FRAMES = 3;
-        int requiredConsecutive = reacquiring ? 5 : 3;
         if (currentTrackingEnabled && !scanActive && d.valid
-            && consecutiveValid >= requiredConsecutive
+            && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;

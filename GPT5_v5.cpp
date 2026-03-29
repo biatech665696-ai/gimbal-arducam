@@ -553,7 +553,7 @@ class MotionDetector
 {
 public:
     MotionDetector()
-        : mog2_(cv::createBackgroundSubtractorMOG2(500, 16.0, false))
+        : mog2_(cv::createBackgroundSubtractorMOG2(500, 30.0, false))
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
@@ -578,7 +578,7 @@ public:
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
     void reinitBGS() {
-        mog2_ = cv::createBackgroundSubtractorMOG2(500, 16.0, false);
+        mog2_ = cv::createBackgroundSubtractorMOG2(500, 30.0, false);
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
         mog2_->setBackgroundRatio(0.9);
@@ -610,7 +610,7 @@ public:
         else
             gray = roi.clone();
 
-        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0.8);
+        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.2);
 
         // === CAMERA MOTION ESTIMATION (sparse LK + affine) ===
         lastGlobalFlow_ = cv::Point2f(0, 0);
@@ -687,7 +687,7 @@ public:
         // === FG PIXEL GATE ===
         // High fg = camera shift noise. Reset consecutive to prevent
         // noise carry-over to first clean frame.
-        if (rawFG > 2000) {
+        if (rawFG > 15000) {
             lastRawContours_ = 0;
             consecutiveDetections_ = 0;
             cooldownFrames_ = 2;  // require 2 clean frames after noise (adaptive exit)
@@ -703,7 +703,7 @@ public:
 
         // === COOLDOWN (adaptive: exit early when FG settles) ===
         if (cooldownFrames_ > 0) {
-            if (rawFG < 300 && flowMag < 0.5f) {
+            if (rawFG < 2000 && flowMag < 0.5f) {
                 cooldownFrames_ = 0;  // FG settled, end cooldown early
                 postCooldownLR_ = 3;  // boost LR to absorb residuals
                 // Don't reset consecutive — scene is clean, allow immediate detection
@@ -957,7 +957,7 @@ public:
 
         std::sort(motions.begin(), motions.end());
         motionMagnitude = motions[motions.size() / 2];
-        return motionMagnitude > 0.3f;
+        return motionMagnitude > 0.15f;
     }
 };
 
@@ -1600,7 +1600,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         Detection d = detector.detect(resized, 0, 0);
 
         // Noise gate: >5 объектов после фильтрации = шум MOG2
-        if ((int)d.all_boxes.size() > 5) {
+        if ((int)d.all_boxes.size() > 20) {
             d.valid = false;
             d.all_boxes.clear();
             detector.resetConsecutive();

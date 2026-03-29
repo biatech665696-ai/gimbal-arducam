@@ -1715,20 +1715,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // Update last known position for spatial gating on next frame
-        if (d.valid) {
+        // Only anchor to position once tracker has confidence (avoids chasing noise)
+        if (d.valid && state.confidence > 0.3) {
+            lastKnownX = d.x;
+            lastKnownY = d.y;
+        } else if (d.valid && lastKnownX < 0) {
+            // First detection ever — allow anchoring to bootstrap tracking
             lastKnownX = d.x;
             lastKnownY = d.y;
         } else if (tracker.isInitialized() && state.confidence > 0.3) {
             // Coast with Kalman prediction
             lastKnownX = state.x;
             lastKnownY = state.y;
+        } else if (tracker.getMissCount() > 30) {
+            // Lost object completely — reset spatial gating, allow full-frame search
+            lastKnownX = -1;
+            lastKnownY = -1;
         }
 
         // === 9+10. SERVO CONTROL — P-regulator with settle ===
-        // After correction, wait 2 frames for MOG2 to absorb camera shift.
-        // Spatial gating lets detection work even during high-fg frames.
+        // Only move servo when tracker has established confidence (avoids chasing noise).
         const int SERVO_SETTLE_FRAMES = 2;
         if (currentTrackingEnabled && !scanActive && d.valid
+            && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;

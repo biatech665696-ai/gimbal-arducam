@@ -653,24 +653,16 @@ public:
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Camera moving → high LR: absorb new background in 1-2 frames
-        // Auto-exposure spike (high fg, no flow) → medium LR to absorb brightness shift
-        // Camera stable → low LR: object stays foreground for detection
+        // Gentle adaptation — never spike high enough to absorb real objects
         double lr;
         if (flowMag > 20.0f) {
-            lr = 0.5;               // Camera motion: fast absorb new bg
+            lr = 0.03;              // Camera/servo motion: gentle absorb
             framesSinceMotion_ = 0;
-        } else if (prevRawFG_ > 50000 && flowMag < 10.0f) {
-            lr = 0.3;               // Auto-exposure spike: absorb brightness change
         } else if (framesSinceMotion_ < 3) {
-            lr = 0.2;               // Post-motion transition
+            lr = 0.015;             // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.008;             // Stable: moderate learning (trail absorbed ~7s)
-            if (postCooldownLR_ > 0) {
-                lr = 0.08;           // Post-cooldown: absorb residuals faster
-                postCooldownLR_--;
-            }
+            lr = 0.005;             // Stable: slow learning, object stays fg
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -685,34 +677,10 @@ public:
         prevRawFG_ = rawFG;
 
         // === FG PIXEL GATE ===
-        // High fg = camera shift noise. Reset consecutive to prevent
-        // noise carry-over to first clean frame.
-        if (rawFG > 50000) {
+        // Very high fg = whole-frame shift (scan step). Skip frame but don't damage state.
+        if (rawFG > 80000) {
             lastRawContours_ = 0;
-            consecutiveDetections_ = 0;
-            cooldownFrames_ = 2;  // require 2 clean frames after noise (adaptive exit)
             return d;
-        }
-
-        // === OF VALIDATION ===
-        // Camera still moving (flow>20) but FG below gate → residual noise
-        if (flowMag > 20.0f) {
-            consecutiveDetections_ = 0;
-            cooldownFrames_ = std::max(cooldownFrames_, 2);
-        }
-
-        // === COOLDOWN (adaptive: exit early when FG settles) ===
-        if (cooldownFrames_ > 0) {
-            if (rawFG < 10000 && flowMag < 10.0f) {
-                cooldownFrames_ = 0;  // FG settled, end cooldown early
-                postCooldownLR_ = 3;  // boost LR to absorb residuals
-                // Don't reset consecutive — scene is clean, allow immediate detection
-            } else {
-                cooldownFrames_--;
-                consecutiveDetections_ = 0;
-                lastRawContours_ = (int)0;
-                return d;
-            }
         }
 
         // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
@@ -752,12 +720,14 @@ public:
         }
 
         // === ВЫБОР ЛУЧШЕГО ОБЪЕКТА ===
-        cv::Point2f currentCenter(-1, -1);
-        bool foundCandidate = false;
-
+        // Если контур прошёл фильтр формы — это валидный объект.
+        // Выбираем ближайший к последнему известному положению (или самый крупный).
         if (!validObjects.empty()) {
             int bestIdx = validObjects[0].second;
+            double bestArea = validObjects[0].first;
+
             if (lastValidCenter_.x > 0) {
+                // Track continuity: pick closest to last known position
                 float bestDist = 1e9f;
                 for (const auto& vo : validObjects) {
                     cv::Moments m = cv::moments(contours[vo.second]);
@@ -769,67 +739,34 @@ public:
                         bestIdx = vo.second;
                     }
                 }
+            } else {
+                // No history: pick largest object
+                for (const auto& vo : validObjects) {
+                    if (vo.first > bestArea) {
+                        bestArea = vo.first;
+                        bestIdx = vo.second;
+                    }
+                }
             }
 
             cv::Moments m = cv::moments(contours[bestIdx]);
             if (m.m00 > 0) {
-                currentCenter.x = (m.m10 / m.m00) + ox;
-                currentCenter.y = (m.m01 / m.m00) + oy;
-
-                if (lastValidCenter_.x > 0) {
-                    float distance = cv::norm(currentCenter - lastValidCenter_);
-                    if (distance < 200.0) {  // allow larger jumps for intermittent detections
-                        // Direction check: reject if moving back toward previous position
-                        // (MOG2 ghost at t-1 position looks like a valid nearby detection)
-                        bool directionOK = true;
-                        if (prevValidCenter_.x > 0 && distance > 3.0f) {
-                            cv::Point2f prevDir = lastValidCenter_ - prevValidCenter_;
-                            cv::Point2f newDir = currentCenter - lastValidCenter_;
-                            float dot = prevDir.x * newDir.x + prevDir.y * newDir.y;
-                            float prevMag = cv::norm(prevDir);
-                            if (prevMag > 3.0f && dot < -0.5f * prevMag * distance) {
-                                // New detection goes backward (>120° from prev direction)
-                                directionOK = false;
-                            }
-                        }
-                        if (directionOK) {
-                            foundCandidate = true;
-                            consecutiveDetections_++;
-                            consecutiveMisses_ = 0;
-                        } else {
-                            consecutiveDetections_ = 0;
-                            // Update anchor so we don't get stuck on stale reference points
-                            prevValidCenter_ = lastValidCenter_;
-                            lastValidCenter_ = currentCenter;
-                        }
-                    } else {
-                        consecutiveDetections_ = 0;
-                        lastValidCenter_ = currentCenter;
-                    }
-                } else {
-                    foundCandidate = true;
-                    consecutiveDetections_ = 1;
-                    lastValidCenter_ = currentCenter;
-                }
-
-                if (foundCandidate && consecutiveDetections_ >= MIN_DETECTIONS) {
-                    d.x = currentCenter.x;
-                    d.y = currentCenter.y;
-                    cv::Rect bbox = cv::boundingRect(contours[bestIdx]);
-                    d.box_x = bbox.x + ox;
-                    d.box_y = bbox.y + oy;
-                    d.box_w = bbox.width;
-                    d.box_h = bbox.height;
-                    d.valid = true;
-                    prevValidCenter_ = lastValidCenter_;
-                    lastValidCenter_ = currentCenter;
-                }
+                cv::Point2f currentCenter((m.m10 / m.m00) + ox, (m.m01 / m.m00) + oy);
+                d.x = currentCenter.x;
+                d.y = currentCenter.y;
+                cv::Rect bbox = cv::boundingRect(contours[bestIdx]);
+                d.box_x = bbox.x + ox;
+                d.box_y = bbox.y + oy;
+                d.box_w = bbox.width;
+                d.box_h = bbox.height;
+                d.valid = true;
+                prevValidCenter_ = lastValidCenter_;
+                lastValidCenter_ = currentCenter;
+                consecutiveDetections_++;
+                consecutiveMisses_ = 0;
             }
-        }
-
-        if (!foundCandidate) {
+        } else {
             consecutiveMisses_++;
-            consecutiveDetections_ = 0;
             if (consecutiveMisses_ > MAX_MISSES)
                 lastValidCenter_ = cv::Point2f(-1, -1);
         }
@@ -1579,47 +1516,35 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === 2. MULTI-SCALE COARSE DETECTION ===
         auto coarseCandidates = multiScale.coarseDetect(f.frame);
 
-        // === 4. ADAPTIVE DYNAMIC ROI ===
-        cv::Rect activeROI;
-        if (dynROI.isFullFrame()) {
-            activeROI = cv::Rect(0, 0, f.frame.cols, f.frame.rows);
-        } else {
-            activeROI = dynROI.getROI();
-            activeROI &= cv::Rect(0, 0, f.frame.cols, f.frame.rows);
-            if (activeROI.width < 10 || activeROI.height < 10)
-                activeROI = cv::Rect(0, 0, f.frame.cols, f.frame.rows);
-        }
-
-        // Resize ROI region to fixed detection size (consistent MOG2 model)
-        cv::Mat roiCrop = f.frame(activeROI);
+        // === DETECTION: always full-frame at fixed resolution ===
+        // MOG2 MUST always see the same viewpoint for stable background model.
+        // ROI crop caused model instability (different content → alternating fg).
         cv::Mat resized;
         const int DET_W = 480, DET_H = 270;
-        cv::resize(roiCrop, resized, cv::Size(DET_W, DET_H), 0, 0, cv::INTER_LINEAR);
+        cv::resize(f.frame, resized, cv::Size(DET_W, DET_H), 0, 0, cv::INTER_LINEAR);
 
-        // === DETECTION within ROI ===
         Detection d = detector.detect(resized, 0, 0);
 
-        // Noise gate: >5 объектов после фильтрации = шум MOG2
-        if ((int)d.all_boxes.size() > 20) {
+        // Noise gate: too many objects = global MOG2 noise burst
+        if ((int)d.all_boxes.size() > 50) {
             d.valid = false;
             d.all_boxes.clear();
-            detector.resetConsecutive();
         }
 
-        // Scale back: detection coords → full-frame coords
-        const double scX = (double)activeROI.width  / DET_W;
-        const double scY = (double)activeROI.height / DET_H;
+        // Scale back: detection coords (480x270) → full-frame coords
+        const double scX = (double)f.frame.cols / DET_W;
+        const double scY = (double)f.frame.rows / DET_H;
         if (d.valid) {
-            d.x = d.x * scX + activeROI.x;
-            d.y = d.y * scY + activeROI.y;
-            d.box_x = (int)(d.box_x * scX) + activeROI.x;
-            d.box_y = (int)(d.box_y * scY) + activeROI.y;
+            d.x = d.x * scX;
+            d.y = d.y * scY;
+            d.box_x = (int)(d.box_x * scX);
+            d.box_y = (int)(d.box_y * scY);
             d.box_w = (int)(d.box_w * scX);
             d.box_h = (int)(d.box_h * scY);
         }
         for (auto& box : d.all_boxes) {
-            box.x = (int)(box.x * scX) + activeROI.x;
-            box.y = (int)(box.y * scY) + activeROI.y;
+            box.x = (int)(box.x * scX);
+            box.y = (int)(box.y * scY);
             box.width  = (int)(box.width  * scX);
             box.height = (int)(box.height * scY);
         }

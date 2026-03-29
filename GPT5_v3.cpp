@@ -1269,7 +1269,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
-        const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;  // 0.03938 deg/px (1.05x, never overshoots center)
+        const double DEG_PER_PX = 72.0 / 1920.0 * 1.0;  // 0.03938 deg/px (1.05x, never overshoots center)
+        // const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;  // 0.03938 deg/px (1.05x, never overshoots center)
 
         // === SCAN MODE LOGIC ===
         bool scanActive = false;

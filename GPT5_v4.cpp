@@ -1417,6 +1417,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double stepYaw   = ex * DEG_PER_PX;
             double stepPitch = ey * DEG_PER_PX;
+
+            // Slew rate limiter: max degrees per frame (~20fps → 16°/s)
+            const double MAX_STEP_DEG = 0.8;
+            if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
+            if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
+            if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
+            if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
+
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;
 

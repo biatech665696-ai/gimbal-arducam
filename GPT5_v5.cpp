@@ -657,10 +657,10 @@ public:
         // Auto-exposure spike (high fg, no flow) → medium LR to absorb brightness shift
         // Camera stable → low LR: object stays foreground for detection
         double lr;
-        if (flowMag > 2.0f) {
+        if (flowMag > 5.0f) {
             lr = 0.5;               // Camera motion: fast absorb new bg
             framesSinceMotion_ = 0;
-        } else if (prevRawFG_ > 5000 && flowMag < 1.0f) {
+        } else if (prevRawFG_ > 15000 && flowMag < 2.0f) {
             lr = 0.3;               // Auto-exposure spike: absorb brightness change
         } else if (framesSinceMotion_ < 3) {
             lr = 0.2;               // Post-motion transition
@@ -695,15 +695,15 @@ public:
         }
 
         // === OF VALIDATION ===
-        // Camera still moving (flow>1.0) but FG below gate → residual noise
-        if (flowMag > 1.0f) {
+        // Camera still moving (flow>5.0) but FG below gate → residual noise
+        if (flowMag > 5.0f) {
             consecutiveDetections_ = 0;
             cooldownFrames_ = std::max(cooldownFrames_, 2);
         }
 
         // === COOLDOWN (adaptive: exit early when FG settles) ===
         if (cooldownFrames_ > 0) {
-            if (rawFG < 2000 && flowMag < 0.5f) {
+            if (rawFG < 5000 && flowMag < 3.0f) {
                 cooldownFrames_ = 0;  // FG settled, end cooldown early
                 postCooldownLR_ = 3;  // boost LR to absorb residuals
                 // Don't reset consecutive — scene is clean, allow immediate detection
@@ -2039,10 +2039,9 @@ int main()
     std::cout << "============================================================================================" << std::endl;
     
     // Create display window
-    cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_NORMAL);
+    cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
+    cv::moveWindow("Predictive Gimbal Control", 100, 50);
     cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
-    // Keep window on top and focused for keyboard input
-    cv::setWindowProperty("Predictive Gimbal Control", cv::WND_PROP_TOPMOST, 1);
     std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
 
     // Start HTTP MJPEG stream server
@@ -2065,7 +2064,9 @@ int main()
             }
             
             if (!frame.empty()) {
-                cv::imshow("Predictive Gimbal Control", frame);
+                cv::Mat display;
+                cv::resize(frame, display, cv::Size(1280, 720));
+                cv::imshow("Predictive Gimbal Control", display);
                 // Update HTTP MJPEG stream frame
                 if (streamRunning) {
                     std::lock_guard<std::mutex> lock(streamMutex);

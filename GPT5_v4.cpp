@@ -1422,7 +1422,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dt = std::chrono::duration<double>(nowTime - prevTime).count();
             if (dt < 0.001) dt = 0.001; // safety clamp
 
-            double Kp = DEG_PER_PX;
+            // Adaptive Kp: softer near center, full strength far away
+            double dist = std::sqrt(ex * ex + ey * ey);
+            double Kp = DEG_PER_PX * std::min(1.0, 0.3 + 0.7 * (dist / 200.0));
             double Kd = 0.004;  // derivative gain (damps approach)
 
             double dex = (ex - prevEx) / dt;

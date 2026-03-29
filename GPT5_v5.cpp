@@ -1533,7 +1533,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         Detection d = detector.detect(resized, 0, 0);
 
         // Noise gate: too many objects = MOG2 noise burst
-        if ((int)d.all_boxes.size() > 15) {
+        if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
         }
@@ -1681,16 +1681,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 9+10. SERVO CONTROL — incremental P-regulator ===
-        // Always use gentle P-control: DualLoopServo PID stalls on oscillating targets.
+        // Only correct when scene is clean (fg < 200) to break servo→noise→servo cycle.
         // P-regulator naturally converges to the average object position.
-        if (currentTrackingEnabled && !scanActive && d.valid) {
+        if (currentTrackingEnabled && !scanActive && d.valid
+            && detector.lastFGPixels() < 200) {
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
             double corrYaw   = -ex * DEG_PER_PX * 0.15;   // 15% of full correction
             double corrPitch = -ey * DEG_PER_PX * 0.15;
-            corrYaw   = std::clamp(corrYaw,   -0.5, 0.5);  // max 0.5° per frame
-            corrPitch = std::clamp(corrPitch, -0.5, 0.5);
+            corrYaw   = std::clamp(corrYaw,   -0.3, 0.3);  // max 0.3° per frame
+            corrPitch = std::clamp(corrPitch, -0.3, 0.3);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 

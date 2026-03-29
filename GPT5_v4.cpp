@@ -394,6 +394,8 @@ std::atomic<bool> trajectoryEnabled(true); // Trajectory drawing ON by default
 std::atomic<double> servoTargetYaw(90.0);
 std::atomic<double> servoTargetPitch(90.0);
 std::atomic<bool>   servoInstantSnap(false); // true = skip interpolation, jump immediately
+std::atomic<double> servoActualYaw(90.0);   // actual interpolated position (for soft shutdown)
+std::atomic<double> servoActualPitch(90.0);
 
 /* =============== PWM CONTROL FUNCTIONS =============== */
 
@@ -1194,6 +1196,10 @@ void servoThread(std::atomic<bool>& run)
         setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(currentYaw));
         setServoAngle(PWM_CHANNEL_VERTICAL,   static_cast<float>(currentPitch));
 
+        // Publish actual position for soft shutdown monitoring
+        servoActualYaw.store(currentYaw);
+        servoActualPitch.store(currentPitch);
+
         std::this_thread::sleep_for(std::chrono::milliseconds(10)); // 100Hz
     }
 }
@@ -1794,19 +1800,41 @@ int main()
         }
     }
 
-    std::cout << "\nShutting down..." << std::endl;
+    // === SOFT COOLDOWN EXIT: smoothly return servos to center ===
+    std::cout << "\nSoft cooldown: returning servos to center..." << std::endl;
+    servoTargetYaw.store(90.0);
+    servoTargetPitch.store(90.0);
+    // Don't snap — let the servo thread's exponential interpolation glide smoothly
+    {
+        auto t0 = std::chrono::steady_clock::now();
+        const double THRESHOLD = 0.5; // degrees from center to consider "arrived"
+        const int TIMEOUT_MS = 2000;  // safety timeout
+        while (true) {
+            double dy = std::abs(servoActualYaw.load() - 90.0);
+            double dp = std::abs(servoActualPitch.load() - 90.0);
+            if (dy < THRESHOLD && dp < THRESHOLD) {
+                std::cout << "Servos centered (yaw err=" << dy << "° pitch err=" << dp << "°)" << std::endl;
+                break;
+            }
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - t0).count();
+            if (elapsed > TIMEOUT_MS) {
+                std::cout << "Cooldown timeout (" << TIMEOUT_MS << "ms), forcing center." << std::endl;
+                setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
+                setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+
+    std::cout << "Shutting down threads..." << std::endl;
     run=false;
     queue.notifyAll();
 
     cam.join();
     track.join();
     servo.join();
-    
-    // Shutdown PWM and return servos to center
-    std::cout << "Returning servos to center position..." << std::endl;
-    setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
-    setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
     if (streamRunning) {
         streamRunning = false;

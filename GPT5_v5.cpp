@@ -1106,9 +1106,9 @@ public:
     int getMissCount() const    { return missCount_; }
 
     double getGateSize() const {
-        if (!initialized_) return 200.0;
+        if (!initialized_) return 1e9;  // Accept ANY measurement for first contact
         double pu = std::sqrt(kf_.errorCovPost.at<double>(0, 0) + kf_.errorCovPost.at<double>(1, 1));
-        return std::clamp(3.0 * pu, 30.0, 300.0);
+        return std::clamp(3.0 * pu, 50.0, 500.0);
     }
 
 private:
@@ -1172,6 +1172,10 @@ private:
         }
         kf_.errorCovPost.at<double>(0, 0) += 10.0;
         kf_.errorCovPost.at<double>(1, 1) += 10.0;
+        // Auto-reset after prolonged loss — allows re-initialization from next detection
+        if (missCount_ > 45) {
+            reset();
+        }
     }
 };
 

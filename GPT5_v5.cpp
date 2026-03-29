@@ -553,7 +553,7 @@ class MotionDetector
 {
 public:
     MotionDetector()
-        : mog2_(cv::createBackgroundSubtractorMOG2(500, 45.0, true))
+        : mog2_(cv::createBackgroundSubtractorMOG2(500, 38.0, true))
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
@@ -578,7 +578,7 @@ public:
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
     void reinitBGS() {
-        mog2_ = cv::createBackgroundSubtractorMOG2(500, 45.0, true);
+        mog2_ = cv::createBackgroundSubtractorMOG2(500, 38.0, true);
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
         mog2_->setBackgroundRatio(0.9);

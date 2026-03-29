@@ -1398,8 +1398,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         lastDetTime = nowTime;
 
         if (d.valid) {
-            // Update Kalman with measurement + predict 80ms ahead for servo lead
-            trackKalman.update(d.x, d.y, frameDt, 0.08);
+            // Update Kalman with measurement, no lead prediction (lead amplifies noise)
+            trackKalman.update(d.x, d.y, frameDt, 0.0);
         } else {
             // No detection: let Kalman coast (predict-only, no correction)
             trackKalman.coast(frameDt);

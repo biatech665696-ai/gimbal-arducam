@@ -596,10 +596,11 @@ public:
             kf_.measurementMatrix.at<double>(1, 1) = 1.0;
 
             // Process noise — tuned for ~20fps object tracking
-            // Lower Q = smoother output, compensated by longer lead prediction
-            cv::setIdentity(kf_.processNoiseCov, cv::Scalar(50.0));
+            // Higher Q = trust measurements more (faster response, more noise)
+            // Lower Q  = smoother but laggier
+            cv::setIdentity(kf_.processNoiseCov, cv::Scalar(500.0));
             // Measurement noise — MOG2 centroid jitter ~10-20px std
-            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(400.0));
+            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(150.0));
 
             cv::setIdentity(kf_.errorCovPost, cv::Scalar(1000.0));
 
@@ -1396,9 +1397,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         lastDetTime = nowTime;
 
         if (d.valid) {
-            // Update Kalman with measurement + predict 150ms ahead for servo lead
-            // (higher lead compensates heavier Kalman smoothing)
-            trackKalman.update(d.x, d.y, frameDt, 0.15);
+            // Update Kalman with measurement + predict 80ms ahead for servo lead
+            trackKalman.update(d.x, d.y, frameDt, 0.08);
         } else {
             // No detection: let Kalman coast (predict-only, no correction)
             trackKalman.coast(frameDt);
@@ -1484,10 +1484,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             noDetectionSince = std::chrono::steady_clock::now();
         }
 
-        // === SERVO CONTROL: always use Kalman output (every frame) ===
-        // Even when d.valid==false, Kalman coasts with predicted position.
-        // This eliminates jumps from intermittent detection gaps.
-        if (currentTrackingEnabled && !scanActive && trackKalman.isInitialized()) {
+        if (d.valid && currentTrackingEnabled && !scanActive) {
+            // Use Kalman-filtered coordinates (already includes lead prediction)
             double ex = trackKalman.x() - cx;
             double ey = trackKalman.y() - cy;
 
@@ -1496,9 +1494,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // Simple P-controller: Kalman provides smooth output, no deadzone needed
+            // Deadzone: don't move servo for tiny errors (noise region)
+            const double DEADZONE_PX = 8.0;
+            if (std::abs(ex) < DEADZONE_PX) ex = 0.0;
+            if (std::abs(ey) < DEADZONE_PX) ey = 0.0;
+
+            // Simple P-controller: Kalman already filters noise, no D-term needed
             double stepYaw   = DEG_PER_PX * ex;
             double stepPitch = DEG_PER_PX * ey;
+
+            // Slew rate limiter: max 1.5 deg/frame (~30°/s at 20fps)
+            const double MAX_STEP_DEG = 1.5;
+            stepYaw   = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepYaw));
+            stepPitch = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepPitch));
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;
@@ -1514,6 +1522,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             servoTargetPitch.store(pitchDeg);
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
+
+            // Без settle: OF компенсирует движение камеры
         }
 
         // ROI для визуализации

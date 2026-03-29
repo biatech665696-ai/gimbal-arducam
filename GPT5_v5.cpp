@@ -1680,40 +1680,24 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             noDetectionSince = std::chrono::steady_clock::now();
         }
 
-        // === 9. PREDICTIVE GIMBAL CONTROL + 10. DUAL-LOOP SERVO ===
-        if (currentTrackingEnabled && !scanActive) {
-            if (tracker.isInitialized() && tracker.getConfidence() > 0.7) {
-                // Predictive control — only when velocity estimate is stable
-                auto cmd = gimbal.compute(predState, cx, cy, lastYawDeg, lastPitchDeg);
-                servoYaw.setTarget(cmd.yawDeg);
-                servoPitch.setTarget(cmd.pitchDeg);
-                double frameDt = 0.033;
-                yawDeg   = servoYaw.tick(frameDt);
-                pitchDeg = servoPitch.tick(frameDt);
+        // === 9+10. SERVO CONTROL — incremental P-regulator ===
+        // Always use gentle P-control: DualLoopServo PID stalls on oscillating targets.
+        // P-regulator naturally converges to the average object position.
+        if (currentTrackingEnabled && !scanActive && d.valid) {
+            double ex = d.x - cx;
+            double ey = d.y - cy;
+            const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
+            double corrYaw   = -ex * DEG_PER_PX * 0.15;   // 15% of full correction
+            double corrPitch = -ey * DEG_PER_PX * 0.15;
+            corrYaw   = std::clamp(corrYaw,   -0.5, 0.5);  // max 0.5° per frame
+            corrPitch = std::clamp(corrPitch, -0.5, 0.5);
+            yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
+            pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-                lastYawDeg = yawDeg;
-                lastPitchDeg = pitchDeg;
-            } else if (d.valid) {
-                // Gentle P-regulator: small corrections so MOG2 can adapt to camera shift
-                double ex = d.x - cx;
-                double ey = d.y - cy;
-                const double DEG_PER_PX_DIRECT = 72.0 / 1920.0 * 1.05;
-                double corrYaw   = -ex * DEG_PER_PX_DIRECT * 0.15;  // 15% of full correction
-                double corrPitch = -ey * DEG_PER_PX_DIRECT * 0.15;
-                corrYaw   = std::clamp(corrYaw,   -0.5, 0.5);  // max 0.5° per frame
-                corrPitch = std::clamp(corrPitch, -0.5, 0.5);
-                yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
-                pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
-
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-                setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-                servoYaw.reset(yawDeg);
-                servoPitch.reset(pitchDeg);
-                lastYawDeg = yawDeg;
-                lastPitchDeg = pitchDeg;
-            }
+            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+            lastYawDeg = yawDeg;
+            lastPitchDeg = pitchDeg;
         }
 
         // ROI для визуализации

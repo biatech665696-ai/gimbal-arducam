@@ -1681,17 +1681,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 9+10. SERVO CONTROL — incremental P-regulator ===
-        // Only correct when scene is clean (fg < 200) to break servo→noise→servo cycle.
-        // P-regulator naturally converges to the average object position.
+        // Only correct when scene is clean (fg < 500) to break servo→noise→servo cycle.
         if (currentTrackingEnabled && !scanActive && d.valid
-            && detector.lastFGPixels() < 200) {
+            && detector.lastFGPixels() < 500) {
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            double corrYaw   = -ex * DEG_PER_PX * 0.15;   // 15% of full correction
-            double corrPitch = -ey * DEG_PER_PX * 0.15;
-            corrYaw   = std::clamp(corrYaw,   -0.3, 0.3);  // max 0.3° per frame
-            corrPitch = std::clamp(corrPitch, -0.3, 0.3);
+            double corrYaw   = -ex * DEG_PER_PX * 0.5;    // 50% of full correction
+            double corrPitch = -ey * DEG_PER_PX * 0.5;
+            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);  // max 1.5° per frame (~25°/s)
+            corrPitch = std::clamp(corrPitch, -1.5, 1.5);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 

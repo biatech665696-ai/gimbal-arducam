@@ -1773,34 +1773,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (servoSettleCounter > 0) servoSettleCounter--;
 
         // Coast servo along predicted trajectory when object is lost
-        // Uses last known velocity to extrapolate where object should be.
-        static double coastVxDeg = 0, coastVyDeg = 0;  // velocity in deg/frame at time of loss
-        if (currentTrackingEnabled && !scanActive) {
-            if (d.valid && state.confidence >= 0.5) {
-                // Save velocity for coast prediction (px/frame → deg/frame)
-                const double DPP = 72.0 / 1920.0 * 1.05;
-                coastVxDeg = -state.vx * DPP / 17.0;  // vx is px/s, /17 → px/frame @17fps
-                coastVyDeg = -state.vy * DPP / 17.0;
-                // Clamp to reasonable coast speed
-                coastVxDeg = std::clamp(coastVxDeg, -1.0, 1.0);
-                coastVyDeg = std::clamp(coastVyDeg, -1.0, 1.0);
-            }
-            // Coast: continue moving servo along predicted trajectory
-            // Start after 15 frames (give detection a chance), decay velocity gradually
-            if (framesWithoutDetection > 15 && framesWithoutDetection < 120) {
-                double decay = std::max(0.0, 1.0 - (framesWithoutDetection - 15) / 105.0);
-                double cYaw  = coastVxDeg * decay;
-                double cPitch = coastVyDeg * decay;
-                if (std::abs(cYaw) > 0.01 || std::abs(cPitch) > 0.01) {
-                    double newYaw   = std::clamp(lastYawDeg + cYaw, 5.0, 175.0);
-                    double newPitch = std::clamp(lastPitchDeg + cPitch, 5.0, 175.0);
-                    setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(newYaw));
-                    setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(newPitch));
-                    lastYawDeg = newYaw;
-                    lastPitchDeg = newPitch;
-                }
-            }
-        }
+        // DISABLED: Kalman velocity estimate is too noisy after short detections,
+        // causing coast to move in wrong direction and lose the object.
+        // Instead, servo holds last position, giving detection a chance to re-acquire.
+        // (No coast movement — servo stays at last known good position)
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);

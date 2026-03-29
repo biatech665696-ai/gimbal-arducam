@@ -562,6 +562,94 @@ struct AngleState
     double wphi;
 };
 
+/* =============== TRACKING KALMAN FILTER =============== */
+// 2D position+velocity Kalman filter for smoothing noisy MOG2 centroids.
+// State: [x, y, vx, vy]   Measurement: [x, y]
+// - Suppresses centroid jitter (~70-90%)
+// - Provides clean velocity estimate (replaces velHistory)
+// - predict() gives lead position for servo (replaces lead correction)
+class TrackingKalman
+{
+public:
+    TrackingKalman() : initialized_(false) {}
+
+    void reset() { initialized_ = false; }
+
+    // Call with new detection.  Returns filtered (x, y).
+    // predictAhead: seconds to extrapolate after correction (for servo lead).
+    void update(double mx, double my, double dt, double predictAhead = 0.0)
+    {
+        if (!initialized_) {
+            kf_ = cv::KalmanFilter(4, 2, 0, CV_64F);
+            // state [x, y, vx, vy]
+            kf_.statePost.at<double>(0) = mx;
+            kf_.statePost.at<double>(1) = my;
+            kf_.statePost.at<double>(2) = 0.0;
+            kf_.statePost.at<double>(3) = 0.0;
+
+            // Transition: x' = x + vx*dt,  vx' = vx
+            cv::setIdentity(kf_.transitionMatrix);
+
+            // Measurement: observe x, y
+            kf_.measurementMatrix = cv::Mat::zeros(2, 4, CV_64F);
+            kf_.measurementMatrix.at<double>(0, 0) = 1.0;
+            kf_.measurementMatrix.at<double>(1, 1) = 1.0;
+
+            // Process noise — tuned for ~20fps object tracking
+            // Higher Q = trust measurements more (faster response, more noise)
+            // Lower Q  = smoother but laggier
+            cv::setIdentity(kf_.processNoiseCov, cv::Scalar(500.0));
+            // Measurement noise — MOG2 centroid jitter ~10-20px std
+            cv::setIdentity(kf_.measurementNoiseCov, cv::Scalar(150.0));
+
+            cv::setIdentity(kf_.errorCovPost, cv::Scalar(1000.0));
+
+            initialized_ = true;
+            filteredX_ = mx;
+            filteredY_ = my;
+            return;
+        }
+
+        // Update transition matrix with actual dt
+        kf_.transitionMatrix.at<double>(0, 2) = dt;
+        kf_.transitionMatrix.at<double>(1, 3) = dt;
+
+        // Predict
+        kf_.predict();
+
+        // Correct with measurement
+        cv::Mat meas = (cv::Mat_<double>(2, 1) << mx, my);
+        kf_.correct(meas);
+
+        // Read filtered state + optional lead extrapolation
+        filteredX_ = kf_.statePost.at<double>(0) + kf_.statePost.at<double>(2) * predictAhead;
+        filteredY_ = kf_.statePost.at<double>(1) + kf_.statePost.at<double>(3) * predictAhead;
+    }
+
+    // Call on frames with no detection to let Kalman coast (predict-only)
+    void coast(double dt)
+    {
+        if (!initialized_) return;
+        kf_.transitionMatrix.at<double>(0, 2) = dt;
+        kf_.transitionMatrix.at<double>(1, 3) = dt;
+        cv::Mat pred = kf_.predict();
+        // Don't correct — just coast
+        // Copy prediction back to statePost so next predict starts here
+        pred.copyTo(kf_.statePost);
+        filteredX_ = pred.at<double>(0);
+        filteredY_ = pred.at<double>(1);
+    }
+
+    double x() const { return filteredX_; }
+    double y() const { return filteredY_; }
+    bool isInitialized() const { return initialized_; }
+
+private:
+    cv::KalmanFilter kf_;
+    bool initialized_;
+    double filteredX_ = 0, filteredY_ = 0;
+};
+
 /* =============== THREAD-SAFE QUEUE =============== */
 
 template<typename T>
@@ -717,25 +805,29 @@ public:
         // sees a stabilized background.  Only the moving object remains as FG.
         // This eliminates the need for FG-gate / cooldown frame skipping.
         cv::Mat stableGray = gray;  // default: no warp
+        warpApplied_ = false;
         if (!lastAffine.empty() && flowMag > 0.3f) {
             // Invert: map current pixels back to where they were in previous frame
             cv::Mat invAffine;
             cv::invertAffineTransform(lastAffine, invAffine);
             cv::warpAffine(gray, stableGray, invAffine, gray.size(),
                            cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+            warpApplied_ = true;
+            warpFlow_ = lastGlobalFlow_;  // save for coordinate correction
         }
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // With frame stabilization, camera motion is compensated before MOG2,
-        // so we no longer need aggressive LR during motion.
+        // With frame stabilization, camera motion is mostly compensated.
+        // Moderate LR keeps MOG2 responsive without eating the object too fast.
         double lr;
         if (prevRawFG_ > 5000 && flowMag < 1.0f) {
-            lr = 0.15;              // Auto-exposure spike: absorb brightness change
+            lr = 0.25;              // Auto-exposure spike: absorb brightness change
+            framesSinceMotion_ = 0;
         } else if (flowMag > 3.0f) {
-            lr = 0.05;              // Large motion (stabilization imperfect): slightly faster learn
+            lr = 0.15;              // Large motion residual: faster learn
             framesSinceMotion_ = 0;
         } else if (framesSinceMotion_ < 2) {
-            lr = 0.03;              // Brief post-motion transition
+            lr = 0.08;              // Brief post-motion transition
             framesSinceMotion_++;
         } else {
             lr = 0.008;             // Stable: moderate learning
@@ -833,33 +925,16 @@ public:
 
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
-                    if (distance < 80.0) {  // at 0.25x = 320px full-res
-                        // Direction check: reject if moving back toward previous position
-                        // (MOG2 ghost at t-1 position looks like a valid nearby detection)
-                        bool directionOK = true;
-                        if (prevValidCenter_.x > 0 && distance > 3.0f) {
-                            cv::Point2f prevDir = lastValidCenter_ - prevValidCenter_;
-                            cv::Point2f newDir = currentCenter - lastValidCenter_;
-                            float dot = prevDir.x * newDir.x + prevDir.y * newDir.y;
-                            float prevMag = cv::norm(prevDir);
-                            if (prevMag > 3.0f && dot < -0.5f * prevMag * distance) {
-                                // New detection goes backward (>120° from prev direction)
-                                directionOK = false;
-                            }
-                        }
-                        if (directionOK) {
-                            foundCandidate = true;
-                            consecutiveDetections_++;
-                            consecutiveMisses_ = 0;
-                        } else {
-                            consecutiveDetections_ = 0;
-                            // Update anchor so we don't get stuck on stale reference points
-                            prevValidCenter_ = lastValidCenter_;
-                            lastValidCenter_ = currentCenter;
-                        }
+                    if (distance < 120.0) {  // at 0.25x = 480px full-res (relaxed from 80)
+                        // Accept detection near previous position
+                        foundCandidate = true;
+                        consecutiveDetections_++;
+                        consecutiveMisses_ = 0;
                     } else {
-                        consecutiveDetections_ = 0;
+                        // Far jump — reset anchor but don't penalize
+                        consecutiveDetections_ = 1;
                         lastValidCenter_ = currentCenter;
+                        foundCandidate = true;
                     }
                 } else {
                     foundCandidate = true;
@@ -908,6 +983,11 @@ private:
     int prevRawFG_;
     int cooldownFrames_;  // frames since last FG gate/noise gate
     int postCooldownLR_;  // frames of elevated LR after cooldown ends
+    bool warpApplied_ = false;  // true if stabilization warp was applied this frame
+    cv::Point2f warpFlow_{0, 0};  // flow used for warp (for coordinate correction)
+public:
+    bool wasWarpApplied() const { return warpApplied_; }
+    cv::Point2f warpFlowUsed() const { return warpFlow_; }
 };
 
 /* =============== ROI COMPUTATION =============== */
@@ -1230,6 +1310,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     // OF детектирует каждый кадр без settle.
     // Глобальное движение камеры компенсируется медианой flow.
 
+    // Kalman filter for smoothing noisy detection coordinates
+    TrackingKalman trackKalman;
+    auto lastDetTime = std::chrono::steady_clock::now();
+
     // Для визуализации
     cv::Rect lastROI;
 
@@ -1264,6 +1348,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // При переключении FIXED → TRACKING: reset detector
         if (modeJustChanged && currentTrackingEnabled) {
             detector.reinitBGS();
+            trackKalman.reset();
         }
 
         // === FRAME PREPARATION ===
@@ -1276,39 +1361,52 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === DETECTION (каждый кадр, без settle) ===
         Detection d = detector.detect(gray, 0, 0);
 
-        // Noise gate: >5 объектов после фильтрации = шум MOG2
-        if ((int)d.all_boxes.size() > 5) {
+        // Noise gate: >10 объектов после фильтрации = шум MOG2
+        // (relaxed from 5 — with stabilization, noise is lower)
+        if ((int)d.all_boxes.size() > 10) {
             d.valid = false;
             d.all_boxes.clear();
-            detector.resetConsecutive();
+            // Don't reset consecutive — next clean frame should pick up immediately
         }
 
         // Scale → full-res
         if (d.valid) {
             d.x *= 4; d.y *= 4;
             d.box_x *= 4; d.box_y *= 4; d.box_w *= 4; d.box_h *= 4;
+
+            // === COORDINATE CORRECTION ===
+            // Detection was done on the stabilized (warped) frame. Coordinates are
+            // in the "previous frame" coordinate system. Map them back to current
+            // frame by adding the optical flow translation (scaled 4x to full-res).
+            if (detector.wasWarpApplied()) {
+                cv::Point2f wf = detector.warpFlowUsed();
+                d.x += wf.x * 4.0;
+                d.y += wf.y * 4.0;
+            }
         }
         for (auto& box : d.all_boxes) {
             box.x *= 4; box.y *= 4; box.width *= 4; box.height *= 4;
         }
 
         // === ПРЯМОЕ НАВЕДЕНИЕ ===
-        // Объект на ex пикселей от центра = ex * (FOV/width) градусов от серво
-        // Коэффициент 1.5x компенсирует задержку камера→детект→серво (~50-100мс)
-        // === VELOCITY ESTIMATION (for lead correction) ===
-        static std::deque<std::tuple<double, double, double>> velHistory; // time, x, y
-        if (modeJustChanged) velHistory.clear();
+        // Kalman filter smooths detection coordinates and provides velocity.
+        // No more velHistory or lead correction — Kalman handles it all.
+        auto nowTime = std::chrono::steady_clock::now();
+        double frameDt = std::chrono::duration<double>(nowTime - lastDetTime).count();
+        if (frameDt > 2.0) frameDt = 0.05;  // clamp after long pause
+        lastDetTime = nowTime;
+
         if (d.valid) {
-            double now = std::chrono::duration<double>(
-                std::chrono::steady_clock::now().time_since_epoch()).count();
-            velHistory.push_back({now, d.x, d.y});
-            while (velHistory.size() > 8) velHistory.pop_front();
+            // Update Kalman with measurement + predict 80ms ahead for servo lead
+            trackKalman.update(d.x, d.y, frameDt, 0.08);
+        } else {
+            // No detection: let Kalman coast (predict-only, no correction)
+            trackKalman.coast(frameDt);
         }
 
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
-        const double DEG_PER_PX = 72.0 / 1920.0 * 1.0;  // 0.03938 deg/px (1.05x, never overshoots center)
-        // const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;  // 0.03938 deg/px (1.05x, never overshoots center)
+        const double DEG_PER_PX = 72.0 / 1920.0 * 1.0;
 
         // === SCAN MODE LOGIC ===
         bool scanActive = false;
@@ -1387,65 +1485,28 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         if (d.valid && currentTrackingEnabled && !scanActive) {
-            double ex = d.x - cx;
-            double ey = d.y - cy;
+            // Use Kalman-filtered coordinates (already includes lead prediction)
+            double ex = trackKalman.x() - cx;
+            double ey = trackKalman.y() - cy;
 
-            // Lead correction: predict where object will be after detection delay
-            // Require 3+ points for reliable velocity (2 points too noisy)
-            if (velHistory.size() >= 3) {
-                auto& [t0, x0, y0] = velHistory.front();
-                auto& [t1, x1, y1] = velHistory.back();
-                double dt = t1 - t0;
-                if (dt > 0.05 && dt < 2.0) {
-                    double vx = (x1 - x0) / dt;
-                    double vy = (y1 - y0) / dt;
-                    const double LEAD_TIME = 0.12; // predict 120ms ahead
-                    double leadX = vx * LEAD_TIME;
-                    double leadY = vy * LEAD_TIME;
-                    // Clamp lead to ±40px: prevent wild jumps from noisy velocity
-                    const double MAX_LEAD = 60.0;
-                    if (leadX > MAX_LEAD) leadX = MAX_LEAD;
-                    if (leadX < -MAX_LEAD) leadX = -MAX_LEAD;
-                    if (leadY > MAX_LEAD) leadY = MAX_LEAD;
-                    if (leadY < -MAX_LEAD) leadY = -MAX_LEAD;
-                    ex += leadX;
-                    ey += leadY;
-                }
-            }
-
-            // Clamp max error: >200px from center = likely false detection
-            const double MAX_ERR = 200.0;
+            // Clamp max error: >300px from center = likely false detection
+            const double MAX_ERR = 300.0;
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // PD-controller: D-term damps oscillations near target
-            static double prevEx = 0.0, prevEy = 0.0;
-            static auto prevTime = std::chrono::steady_clock::now();
-            auto nowTime = std::chrono::steady_clock::now();
-            double dt = std::chrono::duration<double>(nowTime - prevTime).count();
-            if (dt < 0.001) dt = 0.001; // safety clamp
+            // Deadzone: don't move servo for tiny errors (noise region)
+            const double DEADZONE_PX = 8.0;
+            if (std::abs(ex) < DEADZONE_PX) ex = 0.0;
+            if (std::abs(ey) < DEADZONE_PX) ey = 0.0;
 
-            // Adaptive Kp: softer near center, full strength far away
-            double dist = std::sqrt(ex * ex + ey * ey);
-            double Kp = DEG_PER_PX * std::min(1.0, 0.3 + 0.7 * (dist / 200.0));
-            double Kd = 0.004;  // derivative gain (damps approach)
+            // Simple P-controller: Kalman already filters noise, no D-term needed
+            double stepYaw   = DEG_PER_PX * ex;
+            double stepPitch = DEG_PER_PX * ey;
 
-            double dex = (ex - prevEx) / dt;
-            double dey = (ey - prevEy) / dt;
-
-            double stepYaw   = Kp * ex + Kd * dex;
-            double stepPitch = Kp * ey + Kd * dey;
-
-            prevEx = ex;
-            prevEy = ey;
-            prevTime = nowTime;
-
-            // Slew rate limiter: max degrees per frame (~20fps → 16°/s)
-            const double MAX_STEP_DEG = 0.8;
-            if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
-            if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
-            if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
-            if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
+            // Slew rate limiter: max 1.5 deg/frame (~30°/s at 20fps)
+            const double MAX_STEP_DEG = 1.5;
+            stepYaw   = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepYaw));
+            stepPitch = std::max(-MAX_STEP_DEG, std::min(MAX_STEP_DEG, stepPitch));
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

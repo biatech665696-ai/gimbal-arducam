@@ -1167,6 +1167,12 @@ public:
             } else { handleMiss(); }
         } else { handleMiss(); }
 
+        // Clamp velocity in Kalman state to prevent divergence
+        kf_.statePost.at<double>(2) = std::clamp(kf_.statePost.at<double>(2), -500.0, 500.0);
+        kf_.statePost.at<double>(3) = std::clamp(kf_.statePost.at<double>(3), -500.0, 500.0);
+        kf_.statePost.at<double>(4) = std::clamp(kf_.statePost.at<double>(4), -200.0, 200.0);
+        kf_.statePost.at<double>(5) = std::clamp(kf_.statePost.at<double>(5), -200.0, 200.0);
+
         return currentState();
     }
 
@@ -1179,7 +1185,8 @@ public:
     State currentState() const {
         State s;
         s.x  = kf_.statePost.at<double>(0); s.y  = kf_.statePost.at<double>(1);
-        s.vx = kf_.statePost.at<double>(2); s.vy = kf_.statePost.at<double>(3);
+        s.vx = std::clamp(kf_.statePost.at<double>(2), -500.0, 500.0);
+        s.vy = std::clamp(kf_.statePost.at<double>(3), -500.0, 500.0);
         s.ax = kf_.statePost.at<double>(4); s.ay = kf_.statePost.at<double>(5);
         s.confidence = confidence_;
         return s;
@@ -1214,7 +1221,7 @@ private:
         kf_.measurementMatrix = cv::Mat::zeros(2, 6, CV_64F);
         kf_.measurementMatrix.at<double>(0, 0) = 1.0;
         kf_.measurementMatrix.at<double>(1, 1) = 1.0;
-        kf_.measurementNoiseCov = cv::Mat::eye(2, 2, CV_64F) * 4.0;
+        kf_.measurementNoiseCov = cv::Mat::eye(2, 2, CV_64F) * 16.0;
         cv::setIdentity(kf_.errorCovPost, cv::Scalar(100.0));
         kf_.statePost = cv::Mat::zeros(6, 1, CV_64F);
     }
@@ -1231,7 +1238,7 @@ private:
     }
 
     void setQ(double dt) {
-        double q = 500.0;
+        double q = 200.0;
         double dt2 = dt * dt, dt3 = dt2 * dt, dt4 = dt3 * dt, dt5 = dt4 * dt;
         cv::Mat Q = cv::Mat::zeros(6, 6, CV_64F);
         Q.at<double>(0, 0) = dt5 / 20; Q.at<double>(1, 1) = dt5 / 20;
@@ -1805,7 +1812,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         } else {
             consecutiveValid = 0;
             framesWithoutDetection++;
-            prevErrX = 0; prevErrY = 0;  // reset D-term on detection loss
+            if (framesWithoutDetection > 5) {
+                prevErrX = 0; prevErrY = 0;  // reset D-term only after extended loss
+            }
         }
 
         // Update spatial gate: follow ONLY actual detections, never Kalman predictions.
@@ -1837,13 +1846,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            // Deadband: ignore small errors (measurement noise)
-            const double DEADBAND = 15.0; // pixels
+            // Soft deadband: scale down small errors smoothly (no limit cycle)
             double dist = std::sqrt(ex*ex + ey*ey);
-            if (dist < DEADBAND) {
-                prevErrX = ex;
-                prevErrY = ey;
-                goto skip_servo;
+            const double SOFT_DEAD = 12.0; // pixels
+            if (dist > 0.1 && dist < SOFT_DEAD) {
+                double scale = (dist / SOFT_DEAD) * (dist / SOFT_DEAD); // quadratic ramp
+                ex *= scale;
+                ey *= scale;
             }
 
             // D-term: derivative of error (change since last frame)
@@ -1879,7 +1888,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastPitchDeg = pitchDeg;
             servoSettleCounter = 0;  // correct every frame
         }
-        skip_servo:
         if (servoSettleCounter > 0) servoSettleCounter--;
 
         // No coast servo — servo holds last position when object is lost.

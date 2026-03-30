@@ -617,6 +617,7 @@ public:
 
         // === CAMERA MOTION ESTIMATION (sparse LK + affine) ===
         lastGlobalFlow_ = cv::Point2f(0, 0);
+        cv::Mat lastAffine;  // current-to-previous frame transform
 
         if (!prevGray_.empty() && prevGray_.size() == gray.size()) {
             std::vector<cv::Point2f> prevPts;
@@ -645,6 +646,7 @@ public:
                         lastGlobalFlow_ = cv::Point2f(
                             (float)affine.at<double>(0, 2),
                             (float)affine.at<double>(1, 2));
+                        lastAffine = affine.clone();
                     }
                 }
             }
@@ -655,28 +657,45 @@ public:
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === MOG2 LEARNING RATE ===
-        // ROOT CAUSE of detection loss: adaptive LR during camera motion (0.025-0.105)
-        // absorbed the small object (2-3px) into background in ~18 frames.
-        // Fix: freeze model during motion (lr=0), constant low lr when stable.
-        // Object never gets absorbed. Background settles slowly but spatial gate handles noise.
+        // === MOTION-COMPENSATED MOG2 ===
+        // Root cause of detection loss: when camera moves, entire frame shifts,
+        // MOG2 sees ALL pixels as foreground (fg=50000+), creating 300+ noise contours.
+        // Fix: warp current frame to align with MOG2 model's coordinate system.
+        // Background becomes stationary for MOG2. Only real moving object = foreground.
         double lr;
         if (warmupFrames_ > 0) {
             lr = 0.5;               // Fast background learning after init/reinit
             warmupFrames_--;
-        } else if (flowMag > 2.0f) {
-            lr = 0.0;               // Camera moving: FREEZE model, protect object
-            framesSinceMotion_ = 0;
-        } else if (framesSinceMotion_ < 3) {
-            lr = 0.0;               // Just stopped: still freeze for settling
-            framesSinceMotion_++;
         } else {
-            lr = 0.003;             // Stable: slow learning, object stays foreground
+            lr = 0.003;             // Constant low LR: object stays foreground
+        }
+
+        cv::Mat grayForMOG = gray;
+        bool compensated = false;
+        if (!lastAffine.empty() && flowMag > 0.5f) {
+            // Warp current frame back to previous frame's coordinates (undo camera motion)
+            cv::Mat invAffine;
+            cv::invertAffineTransform(lastAffine, invAffine);
+            cv::warpAffine(gray, grayForMOG, invAffine, gray.size(),
+                           cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+            compensated = true;
         }
 
         // === MOG2 FOREGROUND DETECTION ===
         cv::Mat fgMask;
-        mog2_->apply(gray, fgMask, lr);
+        mog2_->apply(grayForMOG, fgMask, lr);
+
+        // Warp fgMask back to current frame coordinates for detection
+        if (compensated) {
+            cv::warpAffine(fgMask, fgMask, lastAffine.rowRange(0, 2), fgMask.size(),
+                           cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0));
+            // Kill border artifacts: edges from warping are unreliable
+            int margin = (int)(flowMag + 2);
+            fgMask.rowRange(0, std::min(margin, fgMask.rows)).setTo(0);
+            fgMask.rowRange(std::max(0, fgMask.rows - margin), fgMask.rows).setTo(0);
+            fgMask.colRange(0, std::min(margin, fgMask.cols)).setTo(0);
+            fgMask.colRange(std::max(0, fgMask.cols - margin), fgMask.cols).setTo(0);
+        }
 
         // Remove shadows (MOG2 marks as 127 when detectShadows=true)
         cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
@@ -1188,17 +1207,17 @@ private:
 
     void handleMiss() {
         missCount_++;
-        confidence_ = std::max(0.0, confidence_ - 0.15);
-        kf_.statePost.at<double>(4) *= 0.7;
-        kf_.statePost.at<double>(5) *= 0.7;
-        if (missCount_ > 5) {
-            kf_.statePost.at<double>(2) *= 0.8;
-            kf_.statePost.at<double>(3) *= 0.8;
+        confidence_ = std::max(0.0, confidence_ - 0.05);
+        kf_.statePost.at<double>(4) *= 0.85;
+        kf_.statePost.at<double>(5) *= 0.85;
+        if (missCount_ > 15) {
+            kf_.statePost.at<double>(2) *= 0.95;
+            kf_.statePost.at<double>(3) *= 0.95;
         }
         kf_.errorCovPost.at<double>(0, 0) += 10.0;
         kf_.errorCovPost.at<double>(1, 1) += 10.0;
         // Auto-reset after prolonged loss — allows re-initialization from next detection
-        if (missCount_ > 15) {
+        if (missCount_ > 45) {
             reset();
         }
     }
@@ -1740,12 +1759,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // First detection ever — allow anchoring to bootstrap tracking
             lastKnownX = d.x;
             lastKnownY = d.y;
-        } else if (tracker.isInitialized() && state.confidence > 0.5) {
-            // Coast with Kalman prediction (only if high confidence)
+        } else if (tracker.isInitialized() && state.confidence > 0.3) {
+            // Coast with Kalman prediction
             lastKnownX = state.x;
             lastKnownY = state.y;
-        } else if (tracker.getMissCount() > 10) {
-            // Lost object — reset spatial gating, allow full-frame search
+        } else if (tracker.getMissCount() > 30) {
+            // Lost object completely — reset spatial gating, allow full-frame search
             lastKnownX = -1;
             lastKnownY = -1;
         }

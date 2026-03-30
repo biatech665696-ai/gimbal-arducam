@@ -1234,9 +1234,9 @@ public:
                 if (stableFrames_ == 0) { locked_ = false; lockConf_ = 0; }
             }
         } else {
-            stableFrames_ = std::max(0, stableFrames_ - 1);
-            lockConf_ *= 0.95;
-            if (lockConf_ < 0.1) { locked_ = false; lockConf_ = 0; }
+            stableFrames_ = std::max(0, stableFrames_ - 2);
+            lockConf_ *= 0.85;  // fast unlock on loss — prevent stale coast
+            if (lockConf_ < 0.15) { locked_ = false; lockConf_ = 0; }
         }
         return { locked_ ? lockVx_ : vx, locked_ ? lockVy_ : vy, locked_, lockConf_ };
     }
@@ -1655,8 +1655,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                       predState.vx, predState.vy, state.confidence);
 
         // === 8. TRAJECTORY PREDICTION ===
-        // Only show prediction when tracker is confident; clear when object is lost
-        if (tracker.getMissCount() > 5) {
+        // Short-lived: clear after 3 misses to avoid stale prediction on screen
+        if (tracker.getMissCount() > 3) {
             predTrajectory.clear();
         } else {
             predTrajectory = TrajectoryPredictor::predictTrajectory(predState, 0.033, 15);
@@ -1785,17 +1785,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (servoSettleCounter > 0) servoSettleCounter--;
 
         // Coast servo along locked velocity when object is temporarily lost
-        // (only when velocity was stable for 5+ frames → VelocityLocker locked)
+        // Short-lived: max 10 frames (~330ms), fast decay (τ=5), low gain
         if (currentTrackingEnabled && !scanActive && !d.valid
             && lockedVel.locked && lockedVel.confidence > 0.3
-            && framesWithoutDetection > 0 && framesWithoutDetection <= 30
+            && framesWithoutDetection > 0 && framesWithoutDetection <= 10
             && servoSettleCounter <= 0) {
-            double coastDecay = std::exp(-framesWithoutDetection / 15.0);
-            double coastGain = 0.25;
+            double coastDecay = std::exp(-framesWithoutDetection / 5.0);
+            double coastGain = 0.15;
             double coastVxDeg = lockedVel.vx * DEG_PER_PX * 0.033 * coastDecay * coastGain;
             double coastVyDeg = lockedVel.vy * DEG_PER_PX * 0.033 * coastDecay * coastGain;
-            coastVxDeg = std::clamp(coastVxDeg, -0.5, 0.5);
-            coastVyDeg = std::clamp(coastVyDeg, -0.5, 0.5);
+            coastVxDeg = std::clamp(coastVxDeg, -0.3, 0.3);
+            coastVyDeg = std::clamp(coastVyDeg, -0.3, 0.3);
             yawDeg   = std::clamp(lastYawDeg   - coastVxDeg,  5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg - coastVyDeg, 5.0, 175.0);
             setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));

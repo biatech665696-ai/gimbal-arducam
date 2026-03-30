@@ -1843,10 +1843,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevErrX = ex;
             prevErrY = ey;
 
-            // PD controller: Kp=0.48, Kd=0.25
+            // PD controller: Kp=0.45, Kd=0.25
             // Kp × error drives toward object
             // Kd × d(error) dampens oscillation (resists rapid error changes)
-            double Kp = 0.48;
+            double Kp = 0.45;
             double Kd = 0.25;
             double corrYaw   = -(ex * Kp + dex * Kd) * DEG_PER_PX;
             double corrPitch = -(ey * Kp + dey * Kd) * DEG_PER_PX;

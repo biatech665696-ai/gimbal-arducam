@@ -1028,9 +1028,10 @@ private:
         }
         double padFactor = 4.0;
         double speed = std::sqrt(vx_ * vx_ + vy_ * vy_);
-        padFactor += speed * 0.02;
-        if (confidence_ < 0.5) padFactor *= (2.0 - confidence_);
+        padFactor += std::min(speed * 0.02, 3.0);  // cap speed contribution
+        if (confidence_ < 0.5) padFactor *= (1.0 + (0.5 - confidence_));  // gentler expansion
         padFactor += framesSinceDetection_ * 0.3;
+        padFactor = std::min(padFactor, 10.0);  // absolute cap
 
         int minSz = 120, maxSz = std::min(frameW_, frameH_) * 3 / 4;
         roiW_ = std::clamp((int)(std::max(objW_, 20) * padFactor), minSz, maxSz);

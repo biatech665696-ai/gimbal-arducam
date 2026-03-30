@@ -665,13 +665,10 @@ public:
             lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
             framesSinceMotion_ = 0;
         } else if (framesSinceMotion_ < 5) {
-            lr = 0.01;              // Post-motion transition
-            framesSinceMotion_++;
-        } else if (prevRawFG_ > 15000) {
-            lr = 0.02;              // Camera still but fg elevated — absorb shifted bg faster
+            lr = 0.005;             // Post-motion transition (gentle)
             framesSinceMotion_++;
         } else {
-            lr = 0.003;             // Fully stable: object stays foreground
+            lr = 0.001;             // Fully stable: small object stays foreground longer
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -687,7 +684,7 @@ public:
 
         // === FG PIXEL GATE ===
         // Very high fg = whole-frame shift (scan step). Skip frame but don't damage state.
-        if (rawFG > 80000) {
+        if (rawFG > 320000) {
             lastRawContours_ = 0;
             return d;
         }
@@ -732,10 +729,10 @@ public:
             }
 
             if (!atEdge &&
-                area >= 3.0 && area <= 1500.0 &&
+                area >= 12.0 && area <= 6000.0 &&
                 solidity > 0.2 &&
-                bbox.width >= 2 && bbox.height >= 2 &&
-                bbox.width <= 100 && bbox.height <= 100 &&
+                bbox.width >= 4 && bbox.height >= 4 &&
+                bbox.width <= 200 && bbox.height <= 200 &&
                 aspectRatio > 0.12 && aspectRatio < 8.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
@@ -1550,7 +1547,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // MOG2 MUST always see the same viewpoint for stable background model.
         // ROI crop caused model instability (different content → alternating fg).
         cv::Mat resized;
-        const int DET_W = 480, DET_H = 270;
+        const int DET_W = 960, DET_H = 540;
         const double scX = (double)f.frame.cols / DET_W;
         const double scY = (double)f.frame.rows / DET_H;
         cv::resize(f.frame, resized, cv::Size(DET_W, DET_H), 0, 0, cv::INTER_LINEAR);
@@ -1569,7 +1566,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
+        float searchRad = 80.0f;  // 80px in det space = 160px full-frame
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
@@ -1605,7 +1602,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             && prevGrayFull.size() == grayFull.size()) {
             float motionMag = 0;
             cv::Rect detRect(d.box_x, d.box_y, d.box_w, d.box_h);
-            if (!motionFilter.validate(prevGrayFull, grayFull, detRect, motionMag))
+            // Skip motion filter for small objects — feature tracking unreliable on <20x20px
+            bool smallObject = (detRect.width * detRect.height < 400);
+            if (!smallObject && !motionFilter.validate(prevGrayFull, grayFull, detRect, motionMag))
                 d.valid = false;   // static ghost → reject
         }
         prevGrayFull = grayFull;

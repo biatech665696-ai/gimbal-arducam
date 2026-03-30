@@ -568,7 +568,10 @@ public:
         , cooldownFrames_(0)
         , postCooldownLR_(0)
         , warmupFrames_(50)
+        , lastObjectRect_()
+        , modelSpaceValid_(false)
     {
+        cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
         mog2_->setBackgroundRatio(0.9);
@@ -588,6 +591,9 @@ public:
         cooldownFrames_ = 0;
         postCooldownLR_ = 0;
         warmupFrames_ = 50;
+        lastObjectRect_ = cv::Rect();
+        cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
+        modelSpaceValid_ = false;
     }
     void resetCounters()
     {
@@ -645,9 +651,21 @@ public:
                         lastGlobalFlow_ = cv::Point2f(
                             (float)affine.at<double>(0, 2),
                             (float)affine.at<double>(1, 2));
+                        // Accumulate affine: model → prev → curr
+                        cv::Mat A3 = cv::Mat::eye(3, 3, CV_64F);
+                        affine.copyTo(A3(cv::Rect(0, 0, 3, 2)));
+                        cv::Mat C3 = cv::Mat::eye(3, 3, CV_64F);
+                        cumulativeAffine_.copyTo(C3(cv::Rect(0, 0, 3, 2)));
+                        cv::Mat R = A3 * C3;
+                        cumulativeAffine_ = R(cv::Rect(0, 0, 3, 2)).clone();
+                        modelSpaceValid_ = true;
                     }
                 }
             }
+        } else if (!prevGray_.empty()) {
+            // ROI size changed — reset motion compensation
+            cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
+            modelSpaceValid_ = false;
         }
 
         prevGray_ = gray.clone();
@@ -655,45 +673,72 @@ public:
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Key constraint: object is 2-3px. High LR absorbs it into background
-        // in just a few frames, causing 2-15s detection gaps.
-        // Solution: cap motion LR low enough that 2-3px object survives.
-        double lr;
-        if (warmupFrames_ > 0) {
-            lr = 0.5;               // Fast background learning after init/reinit
-            warmupFrames_--;
-        } else if (forcedLR > 0.0) {
-            lr = forcedLR;          // Servo-settle override
-        } else if (flowMag > 0.5f) {
-            lr = 0.005;             // Any camera motion: low LR to protect tiny object
-            framesSinceMotion_ = 0;
-        } else if (framesSinceMotion_ < 3) {
-            lr = 0.004;             // Brief post-motion settling
-            framesSinceMotion_++;
-        } else {
-            lr = 0.003;             // Fully stable
+        // === MOTION-COMPENSATED MOG2 DETECTION ===
+        // Principle: warp frame to model space where background is stationary.
+        // All objects shifting uniformly with camera = background.
+        // Only objects with non-uniform motion remain as foreground.
+        // Frame edges (new content from camera motion) excluded via edge mask.
+        float cumTx = modelSpaceValid_ ? (float)cumulativeAffine_.at<double>(0, 2) : 0.0f;
+        float cumTy = modelSpaceValid_ ? (float)cumulativeAffine_.at<double>(1, 2) : 0.0f;
+        float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
+
+        // Reset when model space drifted too far (edge artifacts dominate)
+        if (cumShift > 80.0f) {
+            reinitBGS();
+            prevGray_ = gray.clone();
         }
 
-        // === MOG2 FOREGROUND DETECTION ===
-        cv::Mat fgMask;
-        mog2_->apply(gray, fgMask, lr);
+        double lr;
+        if (warmupFrames_ > 0) {
+            lr = 0.5;
+            warmupFrames_--;
+        } else {
+            lr = 0.003;
+        }
 
-        // Remove shadows (MOG2 marks as 127 when detectShadows=true)
+        // Warp current frame to model space (background stationary)
+        cv::Mat detectFrame = gray;
+        if (modelSpaceValid_) {
+            cv::warpAffine(gray, detectFrame, cumulativeAffine_, gray.size(),
+                           cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                           cv::BORDER_CONSTANT, cv::Scalar(0));
+        }
+
+        // Single-pass MOG2: detect + learn in model space.
+        // Background stationary in model space → learned normally.
+        // Object moves in model space (camera tracked it) → stays foreground.
+        cv::Mat fgMask;
+        mog2_->apply(detectFrame, fgMask, lr);
         cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
 
         int rawFG = cv::countNonZero(fgMask);
         lastFGPixels_ = rawFG;
         prevRawFG_ = rawFG;
 
-        // === FG PIXEL GATE ===
-        // Very high fg = whole-frame shift (scan step). Skip frame but don't damage state.
         if (rawFG > 80000) {
             lastRawContours_ = 0;
             return d;
         }
 
-        // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
+        // Edge mask + warp fgMask back to current frame coordinates
+        if (modelSpaceValid_) {
+            // Exclude model-space pixels outside current frame FOV
+            cv::Mat ones(gray.size(), CV_8UC1, cv::Scalar(255));
+            cv::Mat edgeMask;
+            cv::warpAffine(ones, edgeMask, cumulativeAffine_, gray.size(),
+                           cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                           cv::BORDER_CONSTANT, cv::Scalar(0));
+            cv::threshold(edgeMask, edgeMask, 200, 255, cv::THRESH_BINARY);
+            cv::erode(edgeMask, edgeMask, kernel3_);
+            fgMask &= edgeMask;
+
+            // Transform foreground mask from model space to current frame
+            cv::Mat fgCurr;
+            cv::warpAffine(fgMask, fgCurr, cumulativeAffine_, gray.size(),
+                           cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0));
+            fgMask = fgCurr;
+        }
+
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
@@ -816,6 +861,9 @@ private:
     int cooldownFrames_;  // frames since last FG gate/noise gate
     int postCooldownLR_;  // frames of elevated LR after cooldown ends
     int warmupFrames_;    // frames of fast LR after init/reinit
+    cv::Rect lastObjectRect_;  // last detected object bbox (detection-frame coords)
+    cv::Mat cumulativeAffine_;  // 2x3: model space → current ROI space
+    bool modelSpaceValid_;
 };
 
 /* =============== 2. MULTI-SCALE COARSE DETECTION =============== */

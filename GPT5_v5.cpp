@@ -581,17 +581,6 @@ public:
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
-    // Call after intentional servo motion. Resets motion tracking
-    // so servo movement isn't mistaken for scene drift.
-    // Unlike reinitBGS(), keeps MOG2 model intact — just needs
-    // a few frames to adapt (mini-warmup).
-    void notifyServoMove() {
-        prevGray_ = cv::Mat();  // LK won't compare pre/post-move frames
-        cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
-        modelSpaceValid_ = false;
-        warmupFrames_ = std::max(warmupFrames_, 5);  // 5 frames at lr=0.5
-    }
-
     void reinitBGS() {
         mog2_ = cv::createBackgroundSubtractorMOG2(500, 30.0, false);
         mog2_->setNMixtures(5);
@@ -694,9 +683,13 @@ public:
         float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
 
         // Reset when model space drifted too far (edge artifacts dominate)
-        if (cumShift > 80.0f) {
-            reinitBGS();
-            prevGray_ = gray.clone();
+        // Soft reset: keep MOG2 model, just reset affine + short warmup.
+        // reinitBGS() destroyed MOG2 entirely → 50 frames blind → detection lost.
+        if (cumShift > 150.0f) {
+            cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
+            modelSpaceValid_ = false;
+            prevGray_ = cv::Mat();  // force LK to restart
+            warmupFrames_ = 10;    // 10 frames at lr=0.5 to re-learn shifted background
         }
 
         double lr;
@@ -1810,7 +1803,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — two-zone: coarse + fine centering ===
+        // === 9+10. SERVO CONTROL — three-zone: far / close / lock ===
         const int SERVO_SETTLE_FRAMES = 2;
         if (currentTrackingEnabled && !scanActive && d.valid
             && consecutiveValid >= 3
@@ -1824,22 +1817,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             int settle;
             if (absDist < 50.0) {
                 // Lock zone: servo adopts object's absolute angular coordinates
-                // Object at pixel (d.x, d.y) is offset (ex, ey) from center.
-                // Its absolute angle = currentServo + offset * DEG_PER_PX
                 yawDeg   = std::clamp(lastYawDeg   - ex * DEG_PER_PX, 5.0, 175.0);
                 pitchDeg = std::clamp(lastPitchDeg - ey * DEG_PER_PX, 5.0, 175.0);
-                settle = 0;  // no wait — track continuously
+                settle = 0;
             } else if (absDist < 200.0) {
-                // Close zone: 70% correction to converge quickly
-                double corrYaw   = -ex * DEG_PER_PX * 0.70;
-                double corrPitch = -ey * DEG_PER_PX * 0.70;
-                corrYaw   = std::clamp(corrYaw,   -2.5, 2.5);
-                corrPitch = std::clamp(corrPitch, -2.5, 2.5);
+                // Close zone: 60% correction, converge faster
+                double corrYaw   = -ex * DEG_PER_PX * 0.60;
+                double corrPitch = -ey * DEG_PER_PX * 0.60;
+                corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
+                corrPitch = std::clamp(corrPitch, -2.0, 2.0);
                 yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
                 pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
                 settle = 1;
             } else {
-                // Far zone: conservative approach (same as d3ce9b7)
+                // Far zone: conservative 35% (same as d3ce9b7)
                 double corrYaw   = -ex * DEG_PER_PX * 0.35;
                 double corrPitch = -ey * DEG_PER_PX * 0.35;
                 corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);
@@ -1854,10 +1845,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             servoSettleCounter = settle;
-
-            // Servo moved camera — tell detector this is intentional motion
-            // so it doesn't trigger full reinitBGS (50-frame blind warmup)
-            detector.notifyServoMove();
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

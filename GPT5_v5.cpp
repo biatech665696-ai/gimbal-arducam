@@ -1602,11 +1602,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Only real target stays near center due to servo tracking
             const float frameCx = f.frame.cols * 0.5f;  // 960
             const float frameCy = f.frame.rows * 0.5f;  // 540
-            float dx = (float)d.x - frameCx;
-            float dy = (float)d.y - frameCy;
-            float distFromCenter = std::sqrt(dx * dx + dy * dy);
-            const float maxCenterDist = 300.0f;  // ~300px from center in full-frame coords
-            if (distFromCenter > maxCenterDist) {
+            float dx = std::abs((float)d.x - frameCx);
+            float dy = std::abs((float)d.y - frameCy);
+            if (dx > 50.0f || dy > 50.0f) {
                 d.valid = false;
                 d.all_boxes.clear();
             }

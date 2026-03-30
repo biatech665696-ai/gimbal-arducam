@@ -568,6 +568,7 @@ public:
         , prevRawFG_(0)
         , cooldownFrames_(0)
         , postCooldownLR_(0)
+        , frameCount_(0)
     {
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
@@ -587,6 +588,7 @@ public:
         prevRawFG_ = 0;
         cooldownFrames_ = 0;
         postCooldownLR_ = 0;
+        frameCount_ = 0;  // restart warm-up
     }
     void resetCounters()
     {
@@ -655,21 +657,36 @@ public:
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Proportional to camera motion — even slow servo tracking needs faster absorption
+        // Phase 1 (warm-up, first 60 frames): LR=0.1 — learn background fast.
+        //   fg will be massive but we SUPPRESS detections during warm-up.
+        // Phase 2 (stable): LR adapts based on fg level and camera motion.
+        //   If fg is abnormally high (>15% frame), model is stale — boost LR.
+        //   If camera is moving (flowMag>3), boost LR to absorb new background.
+        //   Otherwise: LR=0.001 — object stays foreground for minutes.
+        frameCount_++;
+        int framePixels = gray.rows * gray.cols;
         double lr;
         if (forcedLR > 0.0) {
-            lr = forcedLR;          // Servo-settle override: quickly absorb new background
-        } else if (flowMag > 15.0f) {
-            lr = 0.05;              // Large camera motion
+            lr = forcedLR;
+        } else if (frameCount_ <= 60) {
+            lr = 0.1;  // warm-up: converge in ~30 frames
+        } else if (prevRawFG_ > framePixels * 3 / 10) {
+            // >30% fg: model is very stale, fast recovery
+            lr = 0.05;
+        } else if (prevRawFG_ > framePixels * 15 / 100) {
+            // >15% fg: model is somewhat stale
+            lr = 0.02;
+        } else if (flowMag > 10.0f) {
+            lr = 0.02;
             framesSinceMotion_ = 0;
-        } else if (flowMag > 2.0f) {
-            lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
+        } else if (flowMag > 3.0f) {
+            lr = 0.005;
             framesSinceMotion_ = 0;
         } else if (framesSinceMotion_ < 5) {
-            lr = 0.01;              // Post-motion transition
+            lr = 0.003;
             framesSinceMotion_++;
         } else {
-            lr = 0.003;             // Fully stable: object stays foreground
+            lr = 0.001;
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -683,14 +700,20 @@ public:
         lastFGPixels_ = rawFG;
         prevRawFG_ = rawFG;
 
-        // === FG PIXEL GATE ===
-        // Very high fg = whole-frame shift (scan step). Skip frame but don't damage state.
-        if (rawFG > 80000) {
+        // Suppress detections during warm-up — bg model not ready
+        if (frameCount_ <= 60) {
             lastRawContours_ = 0;
             return d;
         }
 
-        // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
+        // Suppress detections when fg is abnormally high — model is stale,
+        // most "objects" are shifted background, not real targets.
+        if (rawFG > framePixels * 15 / 100) {
+            lastRawContours_ = 0;
+            return d;
+        }
+
+        // Morphology: CLOSE connects nearby fragments
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
@@ -812,6 +835,7 @@ private:
     int prevRawFG_;
     int cooldownFrames_;  // frames since last FG gate/noise gate
     int postCooldownLR_;  // frames of elevated LR after cooldown ends
+    int frameCount_;       // total frames since init/reinit (for warm-up)
 };
 
 /* =============== 2. MULTI-SCALE COARSE DETECTION =============== */
@@ -1568,20 +1592,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
+        float searchRad = 60.0f;  // 60px in det space = 240px full-frame (wider search)
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
+            // Expand search radius when losing detections — progressive widening
+            if (framesWithoutDetection > 3)
+                searchRad = 60.0f + framesWithoutDetection * 5.0f;
+            if (searchRad > 200.0f || framesWithoutDetection > 15)
+                searchPt = cv::Point2f(-1, -1);  // full-frame fallback earlier
         }
-        // During servo settle: freeze MOG2 learning rate so camera motion
-        // doesn't absorb the object into the background model
-        double detectLR = (servoSettleCounter > 0) ? 0.001 : 0.0;
-        Detection d = detector.detect(resized, 0, 0, detectLR, searchPt, searchRad);
+        // With warm-up phase in MOG2, forcedLR is not needed.
+        Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: even with spatial filter, >5 objects means noise burst
+        // Noise gate: >5 objects in spatial window means noise burst
         if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
         }
+
+        // FG sanity check now handled inside MotionDetector::detect() (>15% threshold).
 
         // Scale back: detection coords (480x270) → full-frame coords
         if (d.valid) {
@@ -1750,29 +1779,26 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Coast with Kalman prediction
             lastKnownX = state.x;
             lastKnownY = state.y;
-        } else if (tracker.getMissCount() > 30) {
-            // Lost object completely — reset spatial gating, allow full-frame search
+        } else if (tracker.getMissCount() > 15) {
+            // Lost object — reset spatial gating sooner, allow full-frame search
             lastKnownX = -1;
             lastKnownY = -1;
         }
 
         // === 9+10. SERVO CONTROL — cautious P-regulator ===
-        // Require 3 consecutive valid detections + conf >= 0.5 before moving.
-        // This prevents noise bursts from causing servo drift.
-        const int SERVO_SETTLE_FRAMES = 3;
+        // Require 3 consecutive valid + conf>=0.5 before moving servo.
+        // Use raw detection error (d.x - cx), NOT trajectory prediction.
+        // TrajectoryPredictor amplified noise and drove servo off-target.
+        const int SERVO_SETTLE_FRAMES = 5;
         if (currentTrackingEnabled && !scanActive && d.valid
             && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
-            // Method 9: predict target position compensating system delay (50ms)
-            auto pred = TrajectoryPredictor::predictAt(predState, SYSTEM_DELAY);
-            double ex = pred.x - cx;
-            double ey = pred.y - cy;
-            double conf = std::clamp(pred.confidence, 0.3, 1.0);
-            ex *= conf;  ey *= conf;
+            double ex = d.x - cx;
+            double ey = d.y - cy;
             double corrYaw   = -ex * DEG_PER_PX * 0.35;
             double corrPitch = -ey * DEG_PER_PX * 0.35;
-            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);  // 1.5°/correction
+            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);
             corrPitch = std::clamp(corrPitch, -1.5, 1.5);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
@@ -1785,25 +1811,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
-        // Coast servo along locked velocity when object is temporarily lost
-        // Short-lived: max 10 frames (~330ms), fast decay (τ=5), low gain
-        if (currentTrackingEnabled && !scanActive && !d.valid
-            && lockedVel.locked && lockedVel.confidence > 0.3
-            && framesWithoutDetection > 0 && framesWithoutDetection <= 10
-            && servoSettleCounter <= 0) {
-            double coastDecay = std::exp(-framesWithoutDetection / 5.0);
-            double coastGain = 0.15;
-            double coastVxDeg = lockedVel.vx * DEG_PER_PX * 0.033 * coastDecay * coastGain;
-            double coastVyDeg = lockedVel.vy * DEG_PER_PX * 0.033 * coastDecay * coastGain;
-            coastVxDeg = std::clamp(coastVxDeg, -0.3, 0.3);
-            coastVyDeg = std::clamp(coastVyDeg, -0.3, 0.3);
-            yawDeg   = std::clamp(lastYawDeg   - coastVxDeg,  5.0, 175.0);
-            pitchDeg = std::clamp(lastPitchDeg - coastVyDeg, 5.0, 175.0);
-            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-            lastYawDeg = yawDeg;
-            lastPitchDeg = pitchDeg;
-        }
+        // Coast prediction DISABLED — holds last position on loss.
+        // Coast was driving servo into background on noisy velocity estimates.
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);

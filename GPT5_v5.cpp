@@ -655,25 +655,23 @@ public:
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Proportional to camera motion — even slow servo tracking needs faster absorption
+        // === MOG2 LEARNING RATE ===
+        // ROOT CAUSE of detection loss: adaptive LR during camera motion (0.025-0.105)
+        // absorbed the small object (2-3px) into background in ~18 frames.
+        // Fix: freeze model during motion (lr=0), constant low lr when stable.
+        // Object never gets absorbed. Background settles slowly but spatial gate handles noise.
         double lr;
         if (warmupFrames_ > 0) {
             lr = 0.5;               // Fast background learning after init/reinit
             warmupFrames_--;
-        } else if (forcedLR > 0.0) {
-            lr = forcedLR;          // Servo-settle override: quickly absorb new background
-        } else if (flowMag > 15.0f) {
-            lr = 0.05;              // Large camera motion
-            framesSinceMotion_ = 0;
         } else if (flowMag > 2.0f) {
-            lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
+            lr = 0.0;               // Camera moving: FREEZE model, protect object
             framesSinceMotion_ = 0;
-        } else if (framesSinceMotion_ < 5) {
-            lr = 0.01;              // Post-motion transition
+        } else if (framesSinceMotion_ < 3) {
+            lr = 0.0;               // Just stopped: still freeze for settling
             framesSinceMotion_++;
         } else {
-            lr = 0.003;             // Fully stable: object stays foreground
+            lr = 0.003;             // Stable: slow learning, object stays foreground
         }
 
         // === MOG2 FOREGROUND DETECTION ===

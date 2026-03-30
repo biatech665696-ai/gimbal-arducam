@@ -1032,20 +1032,27 @@ private:
             double speed = std::sqrt(vx_ * vx_ + vy_ * vy_);
             padFactor += std::min(speed * 0.02, 3.0);
             padFactor += framesSinceDetection_ * 0.3;
+            if (confidence_ < 0.5) padFactor *= (1.0 + (0.5 - confidence_));
         }
-        if (confidence_ < 0.5) padFactor *= (1.0 + (0.5 - confidence_));
         padFactor = std::min(padFactor, 10.0);
 
         int minSz = 120, maxSz = std::min(frameW_, frameH_) * 3 / 4;
         roiW_ = std::clamp((int)(std::max(objW_, 20) * padFactor), minSz, maxSz);
         roiH_ = std::clamp((int)(std::max(objH_, 20) * padFactor), minSz, maxSz);
 
-        // Lead ROI ahead only when predicting during loss, not during active tracking
-        double leadX = (framesSinceDetection_ > 0) ? vx_ * 0.05 : 0.0;
-        double leadY = (framesSinceDetection_ > 0) ? vy_ * 0.05 : 0.0;
-        double alpha = (framesSinceDetection_ < 3) ? 0.7 : 0.3;
-        double cx = alpha * (targetX_ + leadX) + (1.0 - alpha) * (roiX_ + roiW_ / 2.0);
-        double cy = alpha * (targetY_ + leadY) + (1.0 - alpha) * (roiY_ + roiH_ / 2.0);
+        double cx, cy;
+        if (framesSinceDetection_ == 0) {
+            // Object detected: ROI snaps directly to object position, no lag
+            cx = targetX_;
+            cy = targetY_;
+        } else {
+            // Object lost: drift ROI along predicted velocity
+            double leadX = vx_ * 0.05;
+            double leadY = vy_ * 0.05;
+            double alpha = 0.3;
+            cx = alpha * (targetX_ + leadX) + (1.0 - alpha) * (roiX_ + roiW_ / 2.0);
+            cy = alpha * (targetY_ + leadY) + (1.0 - alpha) * (roiY_ + roiH_ / 2.0);
+        }
         roiX_ = std::max(0, (int)(cx - roiW_ / 2.0));
         roiY_ = std::max(0, (int)(cy - roiH_ / 2.0));
         if (roiX_ + roiW_ > frameW_) roiX_ = frameW_ - roiW_;

@@ -1190,17 +1190,17 @@ private:
 
     void handleMiss() {
         missCount_++;
-        confidence_ = std::max(0.0, confidence_ - 0.05);
-        kf_.statePost.at<double>(4) *= 0.85;
-        kf_.statePost.at<double>(5) *= 0.85;
-        if (missCount_ > 15) {
-            kf_.statePost.at<double>(2) *= 0.95;
-            kf_.statePost.at<double>(3) *= 0.95;
+        confidence_ = std::max(0.0, confidence_ - 0.15);
+        kf_.statePost.at<double>(4) *= 0.7;
+        kf_.statePost.at<double>(5) *= 0.7;
+        if (missCount_ > 5) {
+            kf_.statePost.at<double>(2) *= 0.8;
+            kf_.statePost.at<double>(3) *= 0.8;
         }
         kf_.errorCovPost.at<double>(0, 0) += 10.0;
         kf_.errorCovPost.at<double>(1, 1) += 10.0;
         // Auto-reset after prolonged loss — allows re-initialization from next detection
-        if (missCount_ > 45) {
+        if (missCount_ > 15) {
             reset();
         }
     }
@@ -1742,12 +1742,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // First detection ever — allow anchoring to bootstrap tracking
             lastKnownX = d.x;
             lastKnownY = d.y;
-        } else if (tracker.isInitialized() && state.confidence > 0.3) {
-            // Coast with Kalman prediction
+        } else if (tracker.isInitialized() && state.confidence > 0.5) {
+            // Coast with Kalman prediction (only if high confidence)
             lastKnownX = state.x;
             lastKnownY = state.y;
-        } else if (tracker.getMissCount() > 30) {
-            // Lost object completely — reset spatial gating, allow full-frame search
+        } else if (tracker.getMissCount() > 10) {
+            // Lost object — reset spatial gating, allow full-frame search
             lastKnownX = -1;
             lastKnownY = -1;
         }

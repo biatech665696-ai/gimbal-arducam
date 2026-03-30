@@ -24,6 +24,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <pthread.h>
+#include <poll.h>
 
 // Прототип функции для очистки мешающих процессов
 void killPreviousInstances();
@@ -2071,11 +2072,20 @@ int main()
     std::cout << "Press S to enable/disable scan mode" << std::endl;
     std::cout << "============================================================================================" << std::endl;
     
-    // Create display window
-    cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
-    cv::moveWindow("Predictive Gimbal Control", 100, 50);
-    cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
-    std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
+    // Detect headless mode (no X11/Wayland display)
+    bool headless = (getenv("DISPLAY") == nullptr && getenv("WAYLAND_DISPLAY") == nullptr);
+    if (headless) {
+        std::cout << "\n*** HEADLESS MODE (no display) — using HTTP stream + terminal keys ***" << std::endl;
+        std::cout << "Stream: http://169.254.67.80:" << STREAM_PORT << "/" << std::endl;
+    }
+
+    // Create display window (only with GUI)
+    if (!headless) {
+        cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
+        cv::moveWindow("Predictive Gimbal Control", 100, 50);
+        cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
+        std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
+    }
 
     // Start HTTP MJPEG stream server
     streamRunning = true;
@@ -2097,9 +2107,11 @@ int main()
             }
             
             if (!frame.empty()) {
-                cv::Mat display;
-                cv::resize(frame, display, cv::Size(1280, 720));
-                cv::imshow("Predictive Gimbal Control", display);
+                if (!headless) {
+                    cv::Mat display;
+                    cv::resize(frame, display, cv::Size(1280, 720));
+                    cv::imshow("Predictive Gimbal Control", display);
+                }
                 // Update HTTP MJPEG stream frame
                 if (streamRunning) {
                     std::lock_guard<std::mutex> lock(streamMutex);
@@ -2108,8 +2120,18 @@ int main()
             }
         }
         
-        // Check for key press (minimal 1ms delay for fastest response)
-        int key = cv::waitKey(1);
+        int key = -1;
+        if (!headless) {
+            // GUI mode: OpenCV waitKey
+            key = cv::waitKey(1);
+        } else {
+            // Headless: poll stdin for keypresses (non-blocking)
+            struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
+            if (poll(&pfd, 1, 30) > 0 && (pfd.revents & POLLIN)) {
+                char ch = 0;
+                if (read(STDIN_FILENO, &ch, 1) == 1) key = ch;
+            }
+        }
         if (key != -1) {  // If any key was pressed
             std::cout << "\n[KEY DETECTED] Code: " << key << " (char: '" << (char)key << "')" << std::endl;
         }

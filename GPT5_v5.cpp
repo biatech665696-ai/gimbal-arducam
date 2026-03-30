@@ -985,7 +985,7 @@ public:
         , targetX_(frameW / 2.0), targetY_(frameH / 2.0)
         , objW_(0), objH_(0), vx_(0), vy_(0)
         , confidence_(0.0), framesSinceDetection_(999)
-        , initialized_(false)
+        , initialized_(false), suspended_(false)
     {}
 
     void update(bool detected, double x, double y, int objW, int objH,
@@ -997,9 +997,18 @@ public:
             vx_ = vx; vy_ = vy;
             confidence_ = confidence;
             framesSinceDetection_ = 0;
+            if (suspended_) {
+                // Servo locked on — just remember object position, don't create ROI
+                return;
+            }
             initialized_ = true;
         } else {
             framesSinceDetection_++;
+            if (suspended_) {
+                // Detection lost while suspended — resume ROI for search
+                suspended_ = false;
+                initialized_ = true;
+            }
             if (initialized_ && framesSinceDetection_ < 30) {
                 targetX_ += vx_ * 0.033;
                 targetY_ += vy_ * 0.033;
@@ -1010,11 +1019,17 @@ public:
     }
 
     cv::Rect getROI() const { return cv::Rect(roiX_, roiY_, roiW_, roiH_); }
-    bool isFullFrame() const { return !initialized_ || framesSinceDetection_ > 60; }
+    bool isFullFrame() const { return suspended_ || !initialized_ || framesSinceDetection_ > 60; }
+    bool isSuspended() const { return suspended_; }
     void setFrameSize(int w, int h) { frameW_ = w; frameH_ = h; }
+
+    void suspend() {
+        suspended_ = true;
+    }
 
     void reset() {
         initialized_ = false;
+        suspended_ = false;
         framesSinceDetection_ = 999;
         roiX_ = 0; roiY_ = 0;
         roiW_ = frameW_; roiH_ = frameH_;
@@ -1067,6 +1082,7 @@ private:
     double confidence_;
     int framesSinceDetection_;
     bool initialized_;
+    bool suspended_;
 };
 
 /* =============== 5. SUBPIXEL CENTROID ESTIMATION =============== */
@@ -1836,8 +1852,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 yawDeg   = std::clamp(lastYawDeg   - ex * DEG_PER_PX, 5.0, 175.0);
                 pitchDeg = std::clamp(lastPitchDeg - ey * DEG_PER_PX, 5.0, 175.0);
                 settle = 0;
-                // Servo locked on — disable ROI so it doesn't interfere
-                dynROI.reset();
+                // Servo locked on — suspend ROI completely
+                // ROI auto-resumes when detection is lost
+                dynROI.suspend();
             } else {
                 // Far zone: conservative approach (same as d3ce9b7)
                 double corrYaw   = -ex * DEG_PER_PX * 0.35;

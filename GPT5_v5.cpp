@@ -1775,8 +1775,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // First detection ever — allow anchoring to bootstrap tracking
             lastKnownX = d.x;
             lastKnownY = d.y;
-        } else if (tracker.isInitialized() && state.confidence > 0.3) {
-            // Coast with Kalman prediction
+        } else if (tracker.isInitialized() && state.confidence > 0.6 && tracker.getMissCount() <= 3) {
+            // Coast with Kalman prediction — only briefly, with high confidence
             lastKnownX = state.x;
             lastKnownY = state.y;
         } else if (tracker.getMissCount() > 15) {
@@ -1787,10 +1787,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === 9+10. SERVO CONTROL — cautious P-regulator ===
         // Require 3 consecutive valid + conf>=0.5 before moving servo.
-        // Use raw detection error (d.x - cx), NOT trajectory prediction.
-        // TrajectoryPredictor amplified noise and drove servo off-target.
+        // CRITICAL: reject detections far from frame center — they are MOG2 edge
+        // artifacts, not the real object. Real tracked object is within ~300px.
         const int SERVO_SETTLE_FRAMES = 5;
+        double rawEx = d.valid ? (d.x - cx) : 0;
+        double rawEy = d.valid ? (d.y - cy) : 0;
+        double rawErrDist = std::sqrt(rawEx * rawEx + rawEy * rawEy);
+        // If error > 400px from center, this is almost certainly noise — skip.
+        bool tooFarFromCenter = (rawErrDist > 400.0);
         if (currentTrackingEnabled && !scanActive && d.valid
+            && !tooFarFromCenter
             && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {

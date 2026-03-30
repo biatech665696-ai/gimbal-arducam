@@ -1799,9 +1799,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — cautious P-regulator ===
-        // Require 3 consecutive valid detections + conf >= 0.5 before moving.
-        // This prevents noise bursts from causing servo drift.
+        // === 9+10. SERVO CONTROL — progressive P-regulator ===
+        // Correction ramps up gradually: 20% at first → 80% after 10 consecutive frames.
+        // Prevents noise bursts from jerking servo while still catching fast objects.
         const int SERVO_SETTLE_FRAMES = 1;
         if (currentTrackingEnabled && !scanActive && d.valid
             && consecutiveValid >= 2
@@ -1810,10 +1810,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            double corrYaw   = -ex * DEG_PER_PX * 0.70;  // 70% correction
-            double corrPitch = -ey * DEG_PER_PX * 0.70;
-            corrYaw   = std::clamp(corrYaw,   -3.0, 3.0);  // 3°/correction
-            corrPitch = std::clamp(corrPitch, -3.0, 3.0);
+            // Progressive gain: ramp from 0.20 to 0.80 over 10 consecutive valid frames
+            double gain = std::min(0.80, 0.20 + 0.06 * (consecutiveValid - 2));
+            double corrYaw   = -ex * DEG_PER_PX * gain;
+            double corrPitch = -ey * DEG_PER_PX * gain;
+            // Progressive clamp: ±1.0° at start → ±3.0° at full gain
+            double maxCorr = std::min(3.0, 1.0 + 0.2 * (consecutiveValid - 2));
+            corrYaw   = std::clamp(corrYaw,   -maxCorr, maxCorr);
+            corrPitch = std::clamp(corrPitch, -maxCorr, maxCorr);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 

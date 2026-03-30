@@ -1040,10 +1040,17 @@ private:
         roiW_ = std::clamp((int)(std::max(objW_, 20) * padFactor), minSz, maxSz);
         roiH_ = std::clamp((int)(std::max(objH_, 20) * padFactor), minSz, maxSz);
 
-        double leadX = vx_ * 0.05, leadY = vy_ * 0.05;
-        double alpha = (framesSinceDetection_ < 3) ? 0.7 : 0.3;
-        double cx = alpha * (targetX_ + leadX) + (1.0 - alpha) * (roiX_ + roiW_ / 2.0);
-        double cy = alpha * (targetY_ + leadY) + (1.0 - alpha) * (roiY_ + roiH_ / 2.0);
+        double cx, cy;
+        if (framesSinceDetection_ == 0) {
+            // Object detected: snap ROI exactly to object, no EMA, no lead
+            cx = targetX_;
+            cy = targetY_;
+        } else {
+            // Object lost: coast with velocity + EMA toward predicted position
+            double leadX = vx_ * 0.05, leadY = vy_ * 0.05;
+            cx = 0.3 * (targetX_ + leadX) + 0.7 * (roiX_ + roiW_ / 2.0);
+            cy = 0.3 * (targetY_ + leadY) + 0.7 * (roiY_ + roiH_ / 2.0);
+        }
         roiX_ = std::max(0, (int)(cx - roiW_ / 2.0));
         roiY_ = std::max(0, (int)(cy - roiH_ / 2.0));
         if (roiX_ + roiW_ > frameW_) roiX_ = frameW_ - roiW_;
@@ -1803,9 +1810,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — single zone, moderate gain ===
-        // 45% gain, ±1.8° clamp, settle=1 (~2x faster than d3ce9b7 35%/settle=3)
-        // Small individual steps prevent overshoot even with 2-3 frame system delay
+        // === 9+10. SERVO CONTROL — every-frame, 55% gain ===
+        // settle=0: correct every frame (~17 corrections/sec)
+        // 55% gain + ±2.5° clamp: fast convergence without overshoot
         if (currentTrackingEnabled && !scanActive && d.valid
             && consecutiveValid >= 3
             && state.confidence >= 0.5
@@ -1814,18 +1821,27 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            double corrYaw   = -ex * DEG_PER_PX * 0.45;
-            double corrPitch = -ey * DEG_PER_PX * 0.45;
-            corrYaw   = std::clamp(corrYaw,   -1.8, 1.8);
-            corrPitch = std::clamp(corrPitch, -1.8, 1.8);
+            double corrYaw   = -ex * DEG_PER_PX * 0.55;
+            double corrPitch = -ey * DEG_PER_PX * 0.55;
+            corrYaw   = std::clamp(corrYaw,   -2.5, 2.5);
+            corrPitch = std::clamp(corrPitch, -2.5, 2.5);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
+
+            // Compensate spatial gate: servo moves camera → object shifts in frame
+            const double PX_PER_DEG = 1.0 / DEG_PER_PX;
+            double shiftX = -(yawDeg - lastYawDeg)   * PX_PER_DEG;
+            double shiftY = -(pitchDeg - lastPitchDeg) * PX_PER_DEG;
+            if (lastKnownX >= 0) {
+                lastKnownX = std::clamp(lastKnownX + shiftX, 0.0, (double)(f.frame.cols - 1));
+                lastKnownY = std::clamp(lastKnownY + shiftY, 0.0, (double)(f.frame.rows - 1));
+            }
 
             setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
-            servoSettleCounter = 1;
+            servoSettleCounter = 0;  // correct every frame
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

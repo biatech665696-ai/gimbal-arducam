@@ -667,6 +667,9 @@ public:
         } else if (framesSinceMotion_ < 5) {
             lr = 0.01;              // Post-motion transition
             framesSinceMotion_++;
+        } else if (prevRawFG_ > 15000) {
+            lr = 0.02;              // Camera still but fg elevated — absorb shifted bg faster
+            framesSinceMotion_++;
         } else {
             lr = 0.003;             // Fully stable: object stays foreground
         }
@@ -1572,8 +1575,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: even with spatial filter, >5 objects means noise burst
-        if ((int)d.all_boxes.size() > 5) {
+        // Noise gate: >5 objects means noise burst — but allow if spatial gating is active
+        // (spatial proximity gate already filters far-away noise, so we can trust the result)
+        if ((int)d.all_boxes.size() > 5 && lastKnownX < 0) {
             d.valid = false;
             d.all_boxes.clear();
         }
@@ -1786,9 +1790,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 coastVyDeg = std::clamp(coastVyDeg, -1.0, 1.0);
             }
             // Coast: continue moving servo along predicted trajectory
-            // Start after 15 frames (give detection a chance), decay velocity gradually
-            if (framesWithoutDetection > 15 && framesWithoutDetection < 120) {
-                double decay = std::max(0.0, 1.0 - (framesWithoutDetection - 15) / 105.0);
+            // Start after 10 frames (give detection a chance), decay velocity fast
+            if (framesWithoutDetection > 10 && framesWithoutDetection < 40) {
+                double decay = std::max(0.0, 1.0 - (framesWithoutDetection - 10) / 30.0);
                 double cYaw  = coastVxDeg * decay;
                 double cPitch = coastVyDeg * decay;
                 if (std::abs(cYaw) > 0.01 || std::abs(cPitch) > 0.01) {

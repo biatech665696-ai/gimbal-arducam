@@ -569,6 +569,7 @@ public:
         , cooldownFrames_(0)
         , postCooldownLR_(0)
         , frameCount_(0)
+        , lastAffine_(cv::Mat())
     {
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
@@ -589,6 +590,7 @@ public:
         cooldownFrames_ = 0;
         postCooldownLR_ = 0;
         frameCount_ = 0;  // restart warm-up
+        lastAffine_ = cv::Mat();
     }
     void resetCounters()
     {
@@ -646,6 +648,7 @@ public:
                         lastGlobalFlow_ = cv::Point2f(
                             (float)affine.at<double>(0, 2),
                             (float)affine.at<double>(1, 2));
+                        lastAffine_ = affine.clone();
                     }
                 }
             }
@@ -706,12 +709,27 @@ public:
             return d;
         }
 
-        // Suppress detections when fg is abnormally high — model is stale,
-        // most "objects" are shifted background, not real targets.
-        if (rawFG > framePixels * 15 / 100) {
-            lastRawContours_ = 0;
-            return d;
+        // When MOG2 is blinded (fg>5%), switch to motion-compensated frame
+        // differencing.  Warp prev frame by the affine transform to cancel
+        // camera motion — only truly independent-moving objects survive.
+        bool usedFrameDiff = false;
+        if (rawFG > framePixels * 5 / 100 && !prevForDiff_.empty()
+            && !lastAffine_.empty() && prevForDiff_.size() == gray.size()) {
+            cv::Mat warpedPrev;
+            cv::warpAffine(prevForDiff_, warpedPrev, lastAffine_, gray.size(),
+                           cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+            cv::Mat diff;
+            cv::absdiff(gray, warpedPrev, diff);
+            // Higher threshold than MOG2 to reject noise from imperfect warp
+            cv::threshold(diff, fgMask, 30, 255, cv::THRESH_BINARY);
+            // Remove single-pixel noise
+            cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN, kernel2_);
+            usedFrameDiff = true;
+            int diffFG = cv::countNonZero(fgMask);
+            lastFGPixels_ = diffFG;  // report actual diff fg for debug
         }
+        // Save current frame for next iteration's frame differencing
+        prevForDiff_ = gray.clone();
 
         // Morphology: CLOSE connects nearby fragments
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
@@ -836,6 +854,8 @@ private:
     int cooldownFrames_;  // frames since last FG gate/noise gate
     int postCooldownLR_;  // frames of elevated LR after cooldown ends
     int frameCount_;       // total frames since init/reinit (for warm-up)
+    cv::Mat lastAffine_;   // last estimated affine transform (prev→curr)
+    cv::Mat prevForDiff_;  // previous gray frame for frame differencing
 };
 
 /* =============== 2. MULTI-SCALE COARSE DETECTION =============== */

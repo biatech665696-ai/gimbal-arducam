@@ -1316,18 +1316,19 @@ class DualLoopServo
 {
 public:
     DualLoopServo()
-        : oKp_(1.0), oKi_(0.05), oKd_(0.02)
-        , iKp_(0.6), iKd_(0.15)
+        : oKp_(0.4), oKi_(0.01), oKd_(0.005)
+        , iKp_(0.4), iKd_(0.05)
         , desired_(90), current_(90), prevAngle_(90), rate_(0)
         , integral_(0), prevOuterErr_(0), prevInnerErr_(0)
-        , output_(90), slewLimit_(0.5)
+        , output_(90), slewLimit_(1.5)
     {}
 
     void setTarget(double deg) { desired_ = std::clamp(deg, 5.0, 175.0); }
 
     double tick(double dt) {
         if (dt <= 0) dt = 0.033;
-        rate_ = (current_ - prevAngle_) / dt;
+        double rawRate = (current_ - prevAngle_) / dt;
+        rate_ = 0.6 * rate_ + 0.4 * rawRate;  // LP-filtered rate estimate
         prevAngle_ = current_;
 
         // Outer: position → desired rate
@@ -1762,10 +1763,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
-            double ex = d.x - cx;
-            double ey = d.y - cy;
-            const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            double corrYaw   = -ex * DEG_PER_PX * 0.35;  // 35% correction (was 50%)
+            // Method 9: predict target position compensating system delay (50ms)
+            auto pred = TrajectoryPredictor::predictAt(predState, SYSTEM_DELAY);
+            double ex = pred.x - cx;
+            double ey = pred.y - cy;
+            double conf = std::clamp(pred.confidence, 0.3, 1.0);
+            ex *= conf;  ey *= conf;
+            double corrYaw   = -ex * DEG_PER_PX * 0.35;
             double corrPitch = -ey * DEG_PER_PX * 0.35;
             corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);  // 1.5°/correction
             corrPitch = std::clamp(corrPitch, -1.5, 1.5);
@@ -1780,11 +1784,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
-        // Coast servo along predicted trajectory when object is lost
-        // DISABLED: Kalman velocity estimate is too noisy after short detections,
-        // causing coast to move in wrong direction and lose the object.
-        // Instead, servo holds last position, giving detection a chance to re-acquire.
-        // (No coast movement — servo stays at last known good position)
+        // Coast servo along locked velocity when object is temporarily lost
+        // (only when velocity was stable for 5+ frames → VelocityLocker locked)
+        if (currentTrackingEnabled && !scanActive && !d.valid
+            && lockedVel.locked && lockedVel.confidence > 0.3
+            && framesWithoutDetection > 0 && framesWithoutDetection <= 30
+            && servoSettleCounter <= 0) {
+            double coastDecay = std::exp(-framesWithoutDetection / 15.0);
+            double coastGain = 0.25;
+            double coastVxDeg = lockedVel.vx * DEG_PER_PX * 0.033 * coastDecay * coastGain;
+            double coastVyDeg = lockedVel.vy * DEG_PER_PX * 0.033 * coastDecay * coastGain;
+            coastVxDeg = std::clamp(coastVxDeg, -0.5, 0.5);
+            coastVyDeg = std::clamp(coastVyDeg, -0.5, 0.5);
+            yawDeg   = std::clamp(lastYawDeg   - coastVxDeg,  5.0, 175.0);
+            pitchDeg = std::clamp(lastPitchDeg - coastVyDeg, 5.0, 175.0);
+            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+            lastYawDeg = yawDeg;
+            lastPitchDeg = pitchDeg;
+        }
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);
@@ -1860,13 +1878,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
         }
 
-        // Dynamic ROI rectangle (magenta)
-        if (!dynROI.isFullFrame()) {
-            cv::Rect dr = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);
-            cv::rectangle(display, dr, cv::Scalar(255, 0, 255), 2);
-            cv::putText(display, "DROI", cv::Point(dr.x + 5, dr.y + 18),
-                       cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 255), 1);
-        }
         if (d.valid) {
             int px = static_cast<int>(d.x);
             int py = static_cast<int>(d.y);

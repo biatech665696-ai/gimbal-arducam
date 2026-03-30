@@ -1803,48 +1803,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — three-zone: far / close / lock ===
-        const int SERVO_SETTLE_FRAMES = 2;
+        // === 9+10. SERVO CONTROL — single zone, moderate gain ===
+        // 45% gain, ±1.8° clamp, settle=1 (~2x faster than d3ce9b7 35%/settle=3)
+        // Small individual steps prevent overshoot even with 2-3 frame system delay
         if (currentTrackingEnabled && !scanActive && d.valid
             && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;
-            double absDist = std::sqrt(ex * ex + ey * ey);
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            int settle;
-            if (absDist < 50.0) {
-                // Lock zone: servo adopts object's absolute angular coordinates
-                yawDeg   = std::clamp(lastYawDeg   - ex * DEG_PER_PX, 5.0, 175.0);
-                pitchDeg = std::clamp(lastPitchDeg - ey * DEG_PER_PX, 5.0, 175.0);
-                settle = 0;
-            } else if (absDist < 200.0) {
-                // Close zone: 60% correction, converge faster
-                double corrYaw   = -ex * DEG_PER_PX * 0.60;
-                double corrPitch = -ey * DEG_PER_PX * 0.60;
-                corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
-                corrPitch = std::clamp(corrPitch, -2.0, 2.0);
-                yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
-                pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
-                settle = 1;
-            } else {
-                // Far zone: conservative 35% (same as d3ce9b7)
-                double corrYaw   = -ex * DEG_PER_PX * 0.35;
-                double corrPitch = -ey * DEG_PER_PX * 0.35;
-                corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);
-                corrPitch = std::clamp(corrPitch, -1.5, 1.5);
-                yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
-                pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
-                settle = SERVO_SETTLE_FRAMES;
-            }
+            double corrYaw   = -ex * DEG_PER_PX * 0.45;
+            double corrPitch = -ey * DEG_PER_PX * 0.45;
+            corrYaw   = std::clamp(corrYaw,   -1.8, 1.8);
+            corrPitch = std::clamp(corrPitch, -1.8, 1.8);
+            yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
+            pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
             setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
-            servoSettleCounter = settle;
+            servoSettleCounter = 1;
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

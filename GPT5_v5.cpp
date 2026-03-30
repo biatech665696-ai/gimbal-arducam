@@ -1837,6 +1837,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
+            // Deadband: ignore small errors (measurement noise)
+            const double DEADBAND = 15.0; // pixels
+            double dist = std::sqrt(ex*ex + ey*ey);
+            if (dist < DEADBAND) {
+                prevErrX = ex;
+                prevErrY = ey;
+                goto skip_servo;
+            }
+
             // D-term: derivative of error (change since last frame)
             double dex = ex - prevErrX;
             double dey = ey - prevErrY;
@@ -1870,6 +1879,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastPitchDeg = pitchDeg;
             servoSettleCounter = 0;  // correct every frame
         }
+        skip_servo:
         if (servoSettleCounter > 0) servoSettleCounter--;
 
         // No coast servo — servo holds last position when object is lost.

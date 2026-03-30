@@ -1622,6 +1622,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static double lastKnownX = -1, lastKnownY = -1;
         static int consecutiveValid = 0;  // for servo correction gating
         static int framesWithoutDetection = 0;  // for return-to-center
+        static double prevErrX = 0, prevErrY = 0;  // for PD controller D-term
         if (resetSpatialGating) {
             lastKnownX = -1; lastKnownY = -1;
             servoSettleCounter = 0;
@@ -1804,6 +1805,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         } else {
             consecutiveValid = 0;
             framesWithoutDetection++;
+            prevErrX = 0; prevErrY = 0;  // reset D-term on detection loss
         }
 
         // Update spatial gate: follow ONLY actual detections, never Kalman predictions.
@@ -1817,16 +1819,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — every-frame, 55% gain ===
-        // When servo is close to object: respond immediately (consecutiveValid>=1, no conf gate)
-        // When far: require stability (consecutiveValid>=3, confidence>=0.5)
+        // === 9+10. SERVO CONTROL — PD controller with damping ===
+        // P-term: proportional to pixel error → drives toward object
+        // D-term: proportional to change in error → dampens oscillation
+        // When error is shrinking (servo converging), D reduces correction
+        // When error is growing (object escaping), D increases correction
         bool servoAllowed = false;
         if (currentTrackingEnabled && !scanActive && d.valid && servoSettleCounter <= 0) {
             if (servoClose) {
-                // Close zone: servo already near object, respond immediately
                 servoAllowed = (consecutiveValid >= 1);
             } else {
-                // Far zone: use Kalman confidence gate for stability
                 servoAllowed = (consecutiveValid >= 3 && state.confidence >= 0.5);
             }
         }
@@ -1835,10 +1837,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            double corrYaw   = -ex * DEG_PER_PX * 0.55;
-            double corrPitch = -ey * DEG_PER_PX * 0.55;
-            corrYaw   = std::clamp(corrYaw,   -2.5, 2.5);
-            corrPitch = std::clamp(corrPitch, -2.5, 2.5);
+            // D-term: derivative of error (change since last frame)
+            double dex = ex - prevErrX;
+            double dey = ey - prevErrY;
+            prevErrX = ex;
+            prevErrY = ey;
+
+            // PD controller: Kp=0.40, Kd=0.25
+            // Kp × error drives toward object
+            // Kd × d(error) dampens oscillation (resists rapid error changes)
+            double Kp = 0.40;
+            double Kd = 0.25;
+            double corrYaw   = -(ex * Kp + dex * Kd) * DEG_PER_PX;
+            double corrPitch = -(ey * Kp + dey * Kd) * DEG_PER_PX;
+            corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
+            corrPitch = std::clamp(corrPitch, -2.0, 2.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 

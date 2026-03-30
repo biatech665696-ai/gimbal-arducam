@@ -778,6 +778,7 @@ public:
             cv::Moments m = cv::moments(contours[bestIdx]);
             if (m.m00 > 0) {
                 cv::Point2f currentCenter((m.m10 / m.m00) + ox, (m.m01 / m.m00) + oy);
+
                 d.x = currentCenter.x;
                 d.y = currentCenter.y;
                 cv::Rect bbox = cv::boundingRect(contours[bestIdx]);
@@ -1596,6 +1597,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             d.box_y = (int)(d.box_y * scY);
             d.box_w = (int)(d.box_w * scX);
             d.box_h = (int)(d.box_h * scY);
+
+            // Reject objects far from frame center (960,540)
+            // Only real target stays near center due to servo tracking
+            const float frameCx = f.frame.cols * 0.5f;  // 960
+            const float frameCy = f.frame.rows * 0.5f;  // 540
+            float dx = (float)d.x - frameCx;
+            float dy = (float)d.y - frameCy;
+            float distFromCenter = std::sqrt(dx * dx + dy * dy);
+            const float maxCenterDist = 300.0f;  // ~300px from center in full-frame coords
+            if (distFromCenter > maxCenterDist) {
+                d.valid = false;
+                d.all_boxes.clear();
+            }
         }
         for (auto& box : d.all_boxes) {
             box.x = (int)(box.x * scX);

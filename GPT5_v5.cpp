@@ -1709,10 +1709,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 4 (cont). UPDATE DYNAMIC ROI ===
-        dynROI.update(d.valid,
-                      state.x, state.y,
-                      d.valid ? d.box_w : 0, d.valid ? d.box_h : 0,
-                      predState.vx, predState.vy, state.confidence);
+        // When servo is close to object (small pixel error), use raw detection
+        // to prevent Kalman prediction from drifting ROI away.
+        // When far, use Kalman state for smoother convergence.
+        double convergeDist = 9999;
+        if (d.valid) {
+            convergeDist = std::sqrt((d.x - cx) * (d.x - cx) + (d.y - cy) * (d.y - cy));
+        }
+        bool servoClose = (convergeDist < 150.0);  // ~150px = servo nearly caught up
+        if (d.valid && servoClose) {
+            // Servo matched object — use raw detection, bypass Kalman drift
+            dynROI.update(true, d.x, d.y,
+                          d.box_w, d.box_h,
+                          0, 0, 1.0);  // zero velocity = no lead, confidence=1
+        } else {
+            dynROI.update(d.valid,
+                          d.valid ? d.x : state.x, d.valid ? d.y : state.y,
+                          d.valid ? d.box_w : 0, d.valid ? d.box_h : 0,
+                          predState.vx, predState.vy, state.confidence);
+        }
 
         // === 8. TRAJECTORY PREDICTION ===
         predTrajectory = TrajectoryPredictor::predictTrajectory(predState, 0.033, 15);
@@ -1803,12 +1818,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 9+10. SERVO CONTROL — every-frame, 55% gain ===
-        // settle=0: correct every frame (~17 corrections/sec)
-        // 55% gain + ±2.5° clamp: fast convergence without overshoot
-        if (currentTrackingEnabled && !scanActive && d.valid
-            && consecutiveValid >= 3
-            && state.confidence >= 0.5
-            && servoSettleCounter <= 0) {
+        // When servo is close to object: respond immediately (consecutiveValid>=1, no conf gate)
+        // When far: require stability (consecutiveValid>=3, confidence>=0.5)
+        bool servoAllowed = false;
+        if (currentTrackingEnabled && !scanActive && d.valid && servoSettleCounter <= 0) {
+            if (servoClose) {
+                // Close zone: servo already near object, respond immediately
+                servoAllowed = (consecutiveValid >= 1);
+            } else {
+                // Far zone: use Kalman confidence gate for stability
+                servoAllowed = (consecutiveValid >= 3 && state.confidence >= 0.5);
+            }
+        }
+        if (servoAllowed) {
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;

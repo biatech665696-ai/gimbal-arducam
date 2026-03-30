@@ -656,24 +656,23 @@ public:
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Proportional to camera motion — even slow servo tracking needs faster absorption
+        // Key constraint: object is 2-3px. High LR absorbs it into background
+        // in just a few frames, causing 2-15s detection gaps.
+        // Solution: cap motion LR low enough that 2-3px object survives.
         double lr;
         if (warmupFrames_ > 0) {
             lr = 0.5;               // Fast background learning after init/reinit
             warmupFrames_--;
         } else if (forcedLR > 0.0) {
-            lr = forcedLR;          // Servo-settle override: quickly absorb new background
-        } else if (flowMag > 15.0f) {
-            lr = 0.05;              // Large camera motion
+            lr = forcedLR;          // Servo-settle override
+        } else if (flowMag > 0.5f) {
+            lr = 0.005;             // Any camera motion: low LR to protect tiny object
             framesSinceMotion_ = 0;
-        } else if (flowMag > 2.0f) {
-            lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
-            framesSinceMotion_ = 0;
-        } else if (framesSinceMotion_ < 5) {
-            lr = 0.01;              // Post-motion transition
+        } else if (framesSinceMotion_ < 3) {
+            lr = 0.004;             // Brief post-motion settling
             framesSinceMotion_++;
         } else {
-            lr = 0.003;             // Fully stable: object stays foreground
+            lr = 0.003;             // Fully stable
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -778,7 +777,6 @@ public:
             cv::Moments m = cv::moments(contours[bestIdx]);
             if (m.m00 > 0) {
                 cv::Point2f currentCenter((m.m10 / m.m00) + ox, (m.m01 / m.m00) + oy);
-
                 d.x = currentCenter.x;
                 d.y = currentCenter.y;
                 cv::Rect bbox = cv::boundingRect(contours[bestIdx]);
@@ -791,10 +789,6 @@ public:
                 lastValidCenter_ = currentCenter;
                 consecutiveDetections_++;
                 consecutiveMisses_ = 0;
-
-                // Keep only the best object, suppress all others
-                d.all_boxes.clear();
-                d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
             }
         } else {
             consecutiveMisses_++;
@@ -1597,17 +1591,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             d.box_y = (int)(d.box_y * scY);
             d.box_w = (int)(d.box_w * scX);
             d.box_h = (int)(d.box_h * scY);
-
-            // Reject objects far from frame center (960,540)
-            // Only real target stays near center due to servo tracking
-            const float frameCx = f.frame.cols * 0.5f;  // 960
-            const float frameCy = f.frame.rows * 0.5f;  // 540
-            float dx = std::abs((float)d.x - frameCx);
-            float dy = std::abs((float)d.y - frameCy);
-            if (dx > 50.0f || dy > 50.0f) {
-                d.valid = false;
-                d.all_boxes.clear();
-            }
         }
         for (auto& box : d.all_boxes) {
             box.x = (int)(box.x * scX);

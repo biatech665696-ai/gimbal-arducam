@@ -2073,7 +2073,32 @@ int main()
     std::cout << "============================================================================================" << std::endl;
     
     // Detect headless mode (no X11/Wayland display)
+    // Auto-detect X11 even when DISPLAY is unset (e.g. SSH + sudo):
+    // check /tmp/.X11-unix/X0, set DISPLAY=:0 and XAUTHORITY so OpenCV can open a window.
     bool headless = (getenv("DISPLAY") == nullptr && getenv("WAYLAND_DISPLAY") == nullptr);
+    if (headless) {
+        // Check if X11 server is actually running on the local display
+        if (access("/tmp/.X11-unix/X0", F_OK) == 0) {
+            setenv("DISPLAY", ":0", 1);
+            // Set XAUTHORITY so root/sudo can authenticate with X server
+            if (getenv("XAUTHORITY") == nullptr) {
+                // Try common locations
+                const char* candidates[] = {
+                    "/home/bia/.Xauthority",
+                    "/run/user/1000/.Xauthority",
+                    nullptr
+                };
+                for (int i = 0; candidates[i]; i++) {
+                    if (access(candidates[i], R_OK) == 0) {
+                        setenv("XAUTHORITY", candidates[i], 1);
+                        break;
+                    }
+                }
+            }
+            headless = false;
+            std::cout << "\n*** AUTO-DETECTED X11 display :0 ***" << std::endl;
+        }
+    }
     if (headless) {
         std::cout << "\n*** HEADLESS MODE (no display) — using HTTP stream + terminal keys ***" << std::endl;
         std::cout << "Stream: http://169.254.67.80:" << STREAM_PORT << "/" << std::endl;

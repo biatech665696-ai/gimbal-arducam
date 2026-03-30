@@ -24,7 +24,6 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <poll.h>
 
 // Прототип функции для очистки мешающих процессов
 void killPreviousInstances();
@@ -568,8 +567,6 @@ public:
         , prevRawFG_(0)
         , cooldownFrames_(0)
         , postCooldownLR_(0)
-        , frameCount_(0)
-        , lastAffine_(cv::Mat())
     {
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
@@ -589,8 +586,6 @@ public:
         prevRawFG_ = 0;
         cooldownFrames_ = 0;
         postCooldownLR_ = 0;
-        frameCount_ = 0;  // restart warm-up
-        lastAffine_ = cv::Mat();
     }
     void resetCounters()
     {
@@ -648,7 +643,6 @@ public:
                         lastGlobalFlow_ = cv::Point2f(
                             (float)affine.at<double>(0, 2),
                             (float)affine.at<double>(1, 2));
-                        lastAffine_ = affine.clone();
                     }
                 }
             }
@@ -660,36 +654,21 @@ public:
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Phase 1 (warm-up, first 60 frames): LR=0.1 — learn background fast.
-        //   fg will be massive but we SUPPRESS detections during warm-up.
-        // Phase 2 (stable): LR adapts based on fg level and camera motion.
-        //   If fg is abnormally high (>15% frame), model is stale — boost LR.
-        //   If camera is moving (flowMag>3), boost LR to absorb new background.
-        //   Otherwise: LR=0.001 — object stays foreground for minutes.
-        frameCount_++;
-        int framePixels = gray.rows * gray.cols;
+        // Proportional to camera motion — even slow servo tracking needs faster absorption
         double lr;
         if (forcedLR > 0.0) {
-            lr = forcedLR;
-        } else if (frameCount_ <= 60) {
-            lr = 0.1;  // warm-up: converge in ~30 frames
-        } else if (prevRawFG_ > framePixels * 3 / 10) {
-            // >30% fg: model is very stale, fast recovery
-            lr = 0.05;
-        } else if (prevRawFG_ > framePixels * 15 / 100) {
-            // >15% fg: model is somewhat stale
-            lr = 0.02;
-        } else if (flowMag > 10.0f) {
-            lr = 0.02;
+            lr = forcedLR;          // Servo-settle override: quickly absorb new background
+        } else if (flowMag > 15.0f) {
+            lr = 0.05;              // Large camera motion
             framesSinceMotion_ = 0;
-        } else if (flowMag > 3.0f) {
-            lr = 0.005;
+        } else if (flowMag > 2.0f) {
+            lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
             framesSinceMotion_ = 0;
         } else if (framesSinceMotion_ < 5) {
-            lr = 0.003;
+            lr = 0.01;              // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.001;
+            lr = 0.003;             // Fully stable: object stays foreground
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -703,35 +682,14 @@ public:
         lastFGPixels_ = rawFG;
         prevRawFG_ = rawFG;
 
-        // Suppress detections during warm-up — bg model not ready
-        if (frameCount_ <= 60) {
+        // === FG PIXEL GATE ===
+        // Very high fg = whole-frame shift (scan step). Skip frame but don't damage state.
+        if (rawFG > 80000) {
             lastRawContours_ = 0;
             return d;
         }
 
-        // When MOG2 is blinded (fg>5%), switch to motion-compensated frame
-        // differencing.  Warp prev frame by the affine transform to cancel
-        // camera motion — only truly independent-moving objects survive.
-        bool usedFrameDiff = false;
-        if (rawFG > framePixels * 5 / 100 && !prevForDiff_.empty()
-            && !lastAffine_.empty() && prevForDiff_.size() == gray.size()) {
-            cv::Mat warpedPrev;
-            cv::warpAffine(prevForDiff_, warpedPrev, lastAffine_, gray.size(),
-                           cv::INTER_LINEAR, cv::BORDER_REPLICATE);
-            cv::Mat diff;
-            cv::absdiff(gray, warpedPrev, diff);
-            // Higher threshold than MOG2 to reject noise from imperfect warp
-            cv::threshold(diff, fgMask, 30, 255, cv::THRESH_BINARY);
-            // Remove single-pixel noise
-            cv::morphologyEx(fgMask, fgMask, cv::MORPH_OPEN, kernel2_);
-            usedFrameDiff = true;
-            int diffFG = cv::countNonZero(fgMask);
-            lastFGPixels_ = diffFG;  // report actual diff fg for debug
-        }
-        // Save current frame for next iteration's frame differencing
-        prevForDiff_ = gray.clone();
-
-        // Morphology: CLOSE connects nearby fragments
+        // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
@@ -853,9 +811,6 @@ private:
     int prevRawFG_;
     int cooldownFrames_;  // frames since last FG gate/noise gate
     int postCooldownLR_;  // frames of elevated LR after cooldown ends
-    int frameCount_;       // total frames since init/reinit (for warm-up)
-    cv::Mat lastAffine_;   // last estimated affine transform (prev→curr)
-    cv::Mat prevForDiff_;  // previous gray frame for frame differencing
 };
 
 /* =============== 2. MULTI-SCALE COARSE DETECTION =============== */
@@ -1229,18 +1184,17 @@ private:
 
     void handleMiss() {
         missCount_++;
-        confidence_ = std::max(0.0, confidence_ - 0.15);  // fast decay: 1.0→0 in 7 frames
-        kf_.statePost.at<double>(4) *= 0.7;  // aggressive velocity damping
-        kf_.statePost.at<double>(5) *= 0.7;
-        if (missCount_ > 5) {
-            // After 5 misses, also damp position prediction
-            kf_.statePost.at<double>(2) *= 0.8;
-            kf_.statePost.at<double>(3) *= 0.8;
+        confidence_ = std::max(0.0, confidence_ - 0.05);
+        kf_.statePost.at<double>(4) *= 0.85;
+        kf_.statePost.at<double>(5) *= 0.85;
+        if (missCount_ > 15) {
+            kf_.statePost.at<double>(2) *= 0.95;
+            kf_.statePost.at<double>(3) *= 0.95;
         }
-        kf_.errorCovPost.at<double>(0, 0) += 20.0;
-        kf_.errorCovPost.at<double>(1, 1) += 20.0;
-        // Auto-reset after short loss — don't coast into noise
-        if (missCount_ > 20) {
+        kf_.errorCovPost.at<double>(0, 0) += 10.0;
+        kf_.errorCovPost.at<double>(1, 1) += 10.0;
+        // Auto-reset after prolonged loss — allows re-initialization from next detection
+        if (missCount_ > 45) {
             reset();
         }
     }
@@ -1280,9 +1234,9 @@ public:
                 if (stableFrames_ == 0) { locked_ = false; lockConf_ = 0; }
             }
         } else {
-            stableFrames_ = std::max(0, stableFrames_ - 2);
-            lockConf_ *= 0.85;  // fast unlock on loss — prevent stale coast
-            if (lockConf_ < 0.15) { locked_ = false; lockConf_ = 0; }
+            stableFrames_ = std::max(0, stableFrames_ - 1);
+            lockConf_ *= 0.95;
+            if (lockConf_ < 0.1) { locked_ = false; lockConf_ = 0; }
         }
         return { locked_ ? lockVx_ : vx, locked_ ? lockVy_ : vy, locked_, lockConf_ };
     }
@@ -1362,19 +1316,18 @@ class DualLoopServo
 {
 public:
     DualLoopServo()
-        : oKp_(0.4), oKi_(0.01), oKd_(0.005)
-        , iKp_(0.4), iKd_(0.05)
+        : oKp_(1.0), oKi_(0.05), oKd_(0.02)
+        , iKp_(0.6), iKd_(0.15)
         , desired_(90), current_(90), prevAngle_(90), rate_(0)
         , integral_(0), prevOuterErr_(0), prevInnerErr_(0)
-        , output_(90), slewLimit_(1.5)
+        , output_(90), slewLimit_(0.5)
     {}
 
     void setTarget(double deg) { desired_ = std::clamp(deg, 5.0, 175.0); }
 
     double tick(double dt) {
         if (dt <= 0) dt = 0.033;
-        double rawRate = (current_ - prevAngle_) / dt;
-        rate_ = 0.6 * rate_ + 0.4 * rawRate;  // LP-filtered rate estimate
+        rate_ = (current_ - prevAngle_) / dt;
         prevAngle_ = current_;
 
         // Outer: position → desired rate
@@ -1613,25 +1566,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 60.0f;  // 60px in det space = 240px full-frame (wider search)
+        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
-            // Expand search radius when losing detections — progressive widening
-            if (framesWithoutDetection > 3)
-                searchRad = 60.0f + framesWithoutDetection * 5.0f;
-            if (searchRad > 200.0f || framesWithoutDetection > 8)
-                searchPt = cv::Point2f(-1, -1);  // full-frame fallback fast
         }
-        // With warm-up phase in MOG2, forcedLR is not needed.
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: >5 objects in spatial window means noise burst
+        // Noise gate: even with spatial filter, >5 objects means noise burst
         if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
         }
-
-        // FG sanity check now handled inside MotionDetector::detect() (>15% threshold).
 
         // Scale back: detection coords (480x270) → full-frame coords
         if (d.valid) {
@@ -1706,12 +1651,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                       predState.vx, predState.vy, state.confidence);
 
         // === 8. TRAJECTORY PREDICTION ===
-        // Short-lived: clear after 3 misses to avoid stale prediction on screen
-        if (tracker.getMissCount() > 3) {
-            predTrajectory.clear();
-        } else {
-            predTrajectory = TrajectoryPredictor::predictTrajectory(predState, 0.033, 15);
-        }
+        predTrajectory = TrajectoryPredictor::predictTrajectory(predState, 0.033, 15);
 
         double yawDeg = lastYawDeg;
         double pitchDeg = lastPitchDeg;
@@ -1796,36 +1736,30 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // First detection ever — allow anchoring to bootstrap tracking
             lastKnownX = d.x;
             lastKnownY = d.y;
-        } else if (tracker.isInitialized() && state.confidence > 0.6 && tracker.getMissCount() <= 3) {
-            // Coast with Kalman prediction — only briefly, with high confidence
+        } else if (tracker.isInitialized() && state.confidence > 0.3) {
+            // Coast with Kalman prediction
             lastKnownX = state.x;
             lastKnownY = state.y;
-        } else if (tracker.getMissCount() > 8) {
-            // Lost object — reset spatial gating fast, allow full-frame search
+        } else if (tracker.getMissCount() > 30) {
+            // Lost object completely — reset spatial gating, allow full-frame search
             lastKnownX = -1;
             lastKnownY = -1;
         }
 
         // === 9+10. SERVO CONTROL — cautious P-regulator ===
-        // Require 3 consecutive valid + conf>=0.5 before moving servo.
-        // CRITICAL: reject detections far from frame center — they are MOG2 edge
-        // artifacts, not the real object. Real tracked object is within ~300px.
-        const int SERVO_SETTLE_FRAMES = 5;
-        double rawEx = d.valid ? (d.x - cx) : 0;
-        double rawEy = d.valid ? (d.y - cy) : 0;
-        double rawErrDist = std::sqrt(rawEx * rawEx + rawEy * rawEy);
-        // If error > 400px from center, this is almost certainly noise — skip.
-        bool tooFarFromCenter = (rawErrDist > 400.0);
+        // Require 3 consecutive valid detections + conf >= 0.5 before moving.
+        // This prevents noise bursts from causing servo drift.
+        const int SERVO_SETTLE_FRAMES = 3;
         if (currentTrackingEnabled && !scanActive && d.valid
-            && !tooFarFromCenter
             && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;
-            double corrYaw   = -ex * DEG_PER_PX * 0.35;
+            const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
+            double corrYaw   = -ex * DEG_PER_PX * 0.35;  // 35% correction (was 50%)
             double corrPitch = -ey * DEG_PER_PX * 0.35;
-            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);
+            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);  // 1.5°/correction
             corrPitch = std::clamp(corrPitch, -1.5, 1.5);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
@@ -1838,8 +1772,35 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
-        // Coast prediction DISABLED — holds last position on loss.
-        // Coast was driving servo into background on noisy velocity estimates.
+        // Coast servo along predicted trajectory when object is lost
+        // Uses last known velocity to extrapolate where object should be.
+        static double coastVxDeg = 0, coastVyDeg = 0;  // velocity in deg/frame at time of loss
+        if (currentTrackingEnabled && !scanActive) {
+            if (d.valid && state.confidence >= 0.5) {
+                // Save velocity for coast prediction (px/frame → deg/frame)
+                const double DPP = 72.0 / 1920.0 * 1.05;
+                coastVxDeg = -state.vx * DPP / 17.0;  // vx is px/s, /17 → px/frame @17fps
+                coastVyDeg = -state.vy * DPP / 17.0;
+                // Clamp to reasonable coast speed
+                coastVxDeg = std::clamp(coastVxDeg, -1.0, 1.0);
+                coastVyDeg = std::clamp(coastVyDeg, -1.0, 1.0);
+            }
+            // Coast: continue moving servo along predicted trajectory
+            // Start after 15 frames (give detection a chance), decay velocity gradually
+            if (framesWithoutDetection > 15 && framesWithoutDetection < 120) {
+                double decay = std::max(0.0, 1.0 - (framesWithoutDetection - 15) / 105.0);
+                double cYaw  = coastVxDeg * decay;
+                double cPitch = coastVyDeg * decay;
+                if (std::abs(cYaw) > 0.01 || std::abs(cPitch) > 0.01) {
+                    double newYaw   = std::clamp(lastYawDeg + cYaw, 5.0, 175.0);
+                    double newPitch = std::clamp(lastPitchDeg + cPitch, 5.0, 175.0);
+                    setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(newYaw));
+                    setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(newPitch));
+                    lastYawDeg = newYaw;
+                    lastPitchDeg = newPitch;
+                }
+            }
+        }
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);
@@ -1915,6 +1876,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
         }
 
+        // Dynamic ROI rectangle (magenta)
+        if (!dynROI.isFullFrame()) {
+            cv::Rect dr = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);
+            cv::rectangle(display, dr, cv::Scalar(255, 0, 255), 2);
+            cv::putText(display, "DROI", cv::Point(dr.x + 5, dr.y + 18),
+                       cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 0, 255), 1);
+        }
         if (d.valid) {
             int px = static_cast<int>(d.x);
             int py = static_cast<int>(d.y);
@@ -2108,45 +2076,11 @@ int main()
     std::cout << "Press S to enable/disable scan mode" << std::endl;
     std::cout << "============================================================================================" << std::endl;
     
-    // Detect headless mode (no X11/Wayland display)
-    // Auto-detect X11 even when DISPLAY is unset (e.g. SSH + sudo):
-    // check /tmp/.X11-unix/X0, set DISPLAY=:0 and XAUTHORITY so OpenCV can open a window.
-    bool headless = (getenv("DISPLAY") == nullptr && getenv("WAYLAND_DISPLAY") == nullptr);
-    if (headless) {
-        // Check if X11 server is actually running on the local display
-        if (access("/tmp/.X11-unix/X0", F_OK) == 0) {
-            setenv("DISPLAY", ":0", 1);
-            // Set XAUTHORITY so root/sudo can authenticate with X server
-            if (getenv("XAUTHORITY") == nullptr) {
-                // Try common locations
-                const char* candidates[] = {
-                    "/home/bia/.Xauthority",
-                    "/run/user/1000/.Xauthority",
-                    nullptr
-                };
-                for (int i = 0; candidates[i]; i++) {
-                    if (access(candidates[i], R_OK) == 0) {
-                        setenv("XAUTHORITY", candidates[i], 1);
-                        break;
-                    }
-                }
-            }
-            headless = false;
-            std::cout << "\n*** AUTO-DETECTED X11 display :0 ***" << std::endl;
-        }
-    }
-    if (headless) {
-        std::cout << "\n*** HEADLESS MODE (no display) — using HTTP stream + terminal keys ***" << std::endl;
-        std::cout << "Stream: http://169.254.67.80:" << STREAM_PORT << "/" << std::endl;
-    }
-
-    // Create display window (only with GUI)
-    if (!headless) {
-        cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
-        cv::moveWindow("Predictive Gimbal Control", 100, 50);
-        cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
-        std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
-    }
+    // Create display window
+    cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
+    cv::moveWindow("Predictive Gimbal Control", 100, 50);
+    cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
+    std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
 
     // Start HTTP MJPEG stream server
     streamRunning = true;
@@ -2168,11 +2102,9 @@ int main()
             }
             
             if (!frame.empty()) {
-                if (!headless) {
-                    cv::Mat display;
-                    cv::resize(frame, display, cv::Size(1280, 720));
-                    cv::imshow("Predictive Gimbal Control", display);
-                }
+                cv::Mat display;
+                cv::resize(frame, display, cv::Size(1280, 720));
+                cv::imshow("Predictive Gimbal Control", display);
                 // Update HTTP MJPEG stream frame
                 if (streamRunning) {
                     std::lock_guard<std::mutex> lock(streamMutex);
@@ -2181,18 +2113,8 @@ int main()
             }
         }
         
-        int key = -1;
-        if (!headless) {
-            // GUI mode: OpenCV waitKey
-            key = cv::waitKey(1);
-        } else {
-            // Headless: poll stdin for keypresses (non-blocking)
-            struct pollfd pfd = { STDIN_FILENO, POLLIN, 0 };
-            if (poll(&pfd, 1, 30) > 0 && (pfd.revents & POLLIN)) {
-                char ch = 0;
-                if (read(STDIN_FILENO, &ch, 1) == 1) key = ch;
-            }
-        }
+        // Check for key press (minimal 1ms delay for fastest response)
+        int key = cv::waitKey(1);
         if (key != -1) {  // If any key was pressed
             std::cout << "\n[KEY DETECTED] Code: " << key << " (char: '" << (char)key << "')" << std::endl;
         }

@@ -1799,22 +1799,41 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — full error correction ===
-        // Move servo by exactly the angle needed to center the object.
-        // No fractional P-gain — correct 100% of offset each step.
-        // Clamp to ±4° per step to avoid mechanical jerk.
-        const int SERVO_SETTLE_FRAMES = 1;
+        // === 9+10. SERVO CONTROL — two-zone: coarse + fine centering ===
+        // Zone 1 (far): normal 35%, same as before — safe approach
+        // Zone 2 (close, within half-ROI): multiple small steps to minimize error
+        const int SERVO_SETTLE_FRAMES = 2;
         if (currentTrackingEnabled && !scanActive && d.valid
             && consecutiveValid >= 3
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;
+            double absDist = std::sqrt(ex * ex + ey * ey);
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            double corrYaw   = -ex * DEG_PER_PX;   // 100% of error
-            double corrPitch = -ey * DEG_PER_PX;
-            corrYaw   = std::clamp(corrYaw,   -4.0, 4.0);
-            corrPitch = std::clamp(corrPitch, -4.0, 4.0);
+
+            // Half of ROI size as threshold for "close" zone
+            cv::Rect roi = dynROI.getROI();
+            double halfROI = std::min(roi.width, roi.height) * 0.5;
+
+            double corrYaw, corrPitch;
+            int settle;
+            if (absDist < halfROI) {
+                // Close zone: correct 80% of remaining error, small clamp
+                corrYaw   = -ex * DEG_PER_PX * 0.80;
+                corrPitch = -ey * DEG_PER_PX * 0.80;
+                corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
+                corrPitch = std::clamp(corrPitch, -2.0, 2.0);
+                settle = 0;  // no waiting — rapid small corrections
+            } else {
+                // Far zone: conservative approach (same as d3ce9b7)
+                corrYaw   = -ex * DEG_PER_PX * 0.35;
+                corrPitch = -ey * DEG_PER_PX * 0.35;
+                corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);
+                corrPitch = std::clamp(corrPitch, -1.5, 1.5);
+                settle = SERVO_SETTLE_FRAMES;
+            }
+
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
@@ -1822,7 +1841,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
-            servoSettleCounter = SERVO_SETTLE_FRAMES;
+            servoSettleCounter = settle;
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

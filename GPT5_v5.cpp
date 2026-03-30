@@ -581,11 +581,15 @@ public:
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
-    // Reset cumulative affine after intentional camera motion (servo)
-    // so cumShift doesn't accumulate and trigger reinitBGS()
-    void resetCumulativeAffine() {
+    // Call after intentional servo motion. Resets motion tracking
+    // so servo movement isn't mistaken for scene drift.
+    // Unlike reinitBGS(), keeps MOG2 model intact — just needs
+    // a few frames to adapt (mini-warmup).
+    void notifyServoMove() {
+        prevGray_ = cv::Mat();  // LK won't compare pre/post-move frames
         cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
         modelSpaceValid_ = false;
+        warmupFrames_ = std::max(warmupFrames_, 5);  // 5 frames at lr=0.5
     }
 
     void reinitBGS() {
@@ -992,7 +996,7 @@ public:
         , targetX_(frameW / 2.0), targetY_(frameH / 2.0)
         , objW_(0), objH_(0), vx_(0), vy_(0)
         , confidence_(0.0), framesSinceDetection_(999)
-        , initialized_(false), suspended_(false)
+        , initialized_(false)
     {}
 
     void update(bool detected, double x, double y, int objW, int objH,
@@ -1004,18 +1008,9 @@ public:
             vx_ = vx; vy_ = vy;
             confidence_ = confidence;
             framesSinceDetection_ = 0;
-            if (suspended_) {
-                // Servo locked on — just remember object position, don't create ROI
-                return;
-            }
             initialized_ = true;
         } else {
             framesSinceDetection_++;
-            if (suspended_) {
-                // Detection lost while suspended — resume ROI for search
-                suspended_ = false;
-                initialized_ = true;
-            }
             if (initialized_ && framesSinceDetection_ < 30) {
                 targetX_ += vx_ * 0.033;
                 targetY_ += vy_ * 0.033;
@@ -1026,17 +1021,11 @@ public:
     }
 
     cv::Rect getROI() const { return cv::Rect(roiX_, roiY_, roiW_, roiH_); }
-    bool isFullFrame() const { return suspended_ || !initialized_ || framesSinceDetection_ > 60; }
-    bool isSuspended() const { return suspended_; }
+    bool isFullFrame() const { return !initialized_ || framesSinceDetection_ > 60; }
     void setFrameSize(int w, int h) { frameW_ = w; frameH_ = h; }
-
-    void suspend() {
-        suspended_ = true;
-    }
 
     void reset() {
         initialized_ = false;
-        suspended_ = false;
         framesSinceDetection_ = 999;
         roiX_ = 0; roiY_ = 0;
         roiW_ = frameW_; roiH_ = frameH_;
@@ -1049,32 +1038,19 @@ private:
             return;
         }
         double padFactor = 4.0;
-        if (framesSinceDetection_ > 0) {
-            // Only expand for velocity when object is lost (need wider search area)
-            double speed = std::sqrt(vx_ * vx_ + vy_ * vy_);
-            padFactor += std::min(speed * 0.02, 3.0);
-            padFactor += framesSinceDetection_ * 0.3;
-            if (confidence_ < 0.5) padFactor *= (1.0 + (0.5 - confidence_));
-        }
-        padFactor = std::min(padFactor, 10.0);
+        double speed = std::sqrt(vx_ * vx_ + vy_ * vy_);
+        padFactor += speed * 0.02;
+        if (confidence_ < 0.5) padFactor *= (2.0 - confidence_);
+        padFactor += framesSinceDetection_ * 0.3;
 
         int minSz = 120, maxSz = std::min(frameW_, frameH_) * 3 / 4;
         roiW_ = std::clamp((int)(std::max(objW_, 20) * padFactor), minSz, maxSz);
         roiH_ = std::clamp((int)(std::max(objH_, 20) * padFactor), minSz, maxSz);
 
-        double cx, cy;
-        if (framesSinceDetection_ == 0) {
-            // Object detected: ROI snaps directly to object position, no lag
-            cx = targetX_;
-            cy = targetY_;
-        } else {
-            // Object lost: drift ROI along predicted velocity
-            double leadX = vx_ * 0.05;
-            double leadY = vy_ * 0.05;
-            double alpha = 0.3;
-            cx = alpha * (targetX_ + leadX) + (1.0 - alpha) * (roiX_ + roiW_ / 2.0);
-            cy = alpha * (targetY_ + leadY) + (1.0 - alpha) * (roiY_ + roiH_ / 2.0);
-        }
+        double leadX = vx_ * 0.05, leadY = vy_ * 0.05;
+        double alpha = (framesSinceDetection_ < 3) ? 0.7 : 0.3;
+        double cx = alpha * (targetX_ + leadX) + (1.0 - alpha) * (roiX_ + roiW_ / 2.0);
+        double cy = alpha * (targetY_ + leadY) + (1.0 - alpha) * (roiY_ + roiH_ / 2.0);
         roiX_ = std::max(0, (int)(cx - roiW_ / 2.0));
         roiY_ = std::max(0, (int)(cy - roiH_ / 2.0));
         if (roiX_ + roiW_ > frameW_) roiX_ = frameW_ - roiW_;
@@ -1089,7 +1065,6 @@ private:
     double confidence_;
     int framesSinceDetection_;
     bool initialized_;
-    bool suspended_;
 };
 
 /* =============== 5. SUBPIXEL CENTROID ESTIMATION =============== */
@@ -1836,8 +1811,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 9+10. SERVO CONTROL — two-zone: coarse + fine centering ===
-        // Zone 1 (far): normal 35%, same as before — safe approach
-        // Zone 2 (close, within half-ROI): multiple small steps to minimize error
         const int SERVO_SETTLE_FRAMES = 2;
         if (currentTrackingEnabled && !scanActive && d.valid
             && consecutiveValid >= 3
@@ -1848,20 +1821,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double absDist = std::sqrt(ex * ex + ey * ey);
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            // Fixed threshold for "close" zone: ~150px (~quarter frame)
-            const double CLOSE_THRESHOLD = 150.0;
-
             int settle;
-            if (absDist < CLOSE_THRESHOLD) {
-                // Close zone: adopt object's absolute angular coordinates
-                // Object at pixel (d.x, d.y) → its absolute angle =
-                //   currentServo + (pixel - center) * DEG_PER_PX
+            if (absDist < 50.0) {
+                // Lock zone: servo adopts object's absolute angular coordinates
+                // Object at pixel (d.x, d.y) is offset (ex, ey) from center.
+                // Its absolute angle = currentServo + offset * DEG_PER_PX
                 yawDeg   = std::clamp(lastYawDeg   - ex * DEG_PER_PX, 5.0, 175.0);
                 pitchDeg = std::clamp(lastPitchDeg - ey * DEG_PER_PX, 5.0, 175.0);
-                settle = 0;
-                // Servo locked on — suspend ROI completely
-                // ROI auto-resumes when detection is lost
-                dynROI.suspend();
+                settle = 0;  // no wait — track continuously
+            } else if (absDist < 200.0) {
+                // Close zone: 70% correction to converge quickly
+                double corrYaw   = -ex * DEG_PER_PX * 0.70;
+                double corrPitch = -ey * DEG_PER_PX * 0.70;
+                corrYaw   = std::clamp(corrYaw,   -2.5, 2.5);
+                corrPitch = std::clamp(corrPitch, -2.5, 2.5);
+                yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
+                pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
+                settle = 1;
             } else {
                 // Far zone: conservative approach (same as d3ce9b7)
                 double corrYaw   = -ex * DEG_PER_PX * 0.35;
@@ -1879,10 +1855,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastPitchDeg = pitchDeg;
             servoSettleCounter = settle;
 
-            // Servo moved camera intentionally — reset cumulative affine
-            // so this planned motion doesn't accumulate in cumShift
-            // and trigger reinitBGS() (50-frame blind warmup)
-            detector.resetCumulativeAffine();
+            // Servo moved camera — tell detector this is intentional motion
+            // so it doesn't trigger full reinitBGS (50-frame blind warmup)
+            detector.notifyServoMove();
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

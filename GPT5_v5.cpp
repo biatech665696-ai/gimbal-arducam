@@ -683,9 +683,10 @@ public:
         float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
 
         // Reset when model space drifted too far (edge artifacts dominate)
+        // Don't reinit MOG2 — just reset affine. Model adapts gradually at lr=0.003.
         if (cumShift > 80.0f) {
-            reinitBGS();
-            prevGray_ = gray.clone();
+            cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
+            modelSpaceValid_ = false;
         }
 
         double lr;
@@ -1802,18 +1803,18 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === 9+10. SERVO CONTROL — cautious P-regulator ===
         // Require 3 consecutive valid detections + conf >= 0.5 before moving.
         // This prevents noise bursts from causing servo drift.
-        const int SERVO_SETTLE_FRAMES = 3;
+        const int SERVO_SETTLE_FRAMES = 1;
         if (currentTrackingEnabled && !scanActive && d.valid
-            && consecutiveValid >= 3
+            && consecutiveValid >= 2
             && state.confidence >= 0.5
             && servoSettleCounter <= 0) {
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            double corrYaw   = -ex * DEG_PER_PX * 0.35;  // 35% correction (was 50%)
-            double corrPitch = -ey * DEG_PER_PX * 0.35;
-            corrYaw   = std::clamp(corrYaw,   -1.5, 1.5);  // 1.5°/correction
-            corrPitch = std::clamp(corrPitch, -1.5, 1.5);
+            double corrYaw   = -ex * DEG_PER_PX * 0.6;   // 60% correction (was 35%)
+            double corrPitch = -ey * DEG_PER_PX * 0.6;
+            corrYaw   = std::clamp(corrYaw,   -3.0, 3.0);  // 3°/correction (was 1.5°)
+            corrPitch = std::clamp(corrPitch, -3.0, 3.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 

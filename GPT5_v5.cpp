@@ -656,22 +656,24 @@ public:
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Key insight: high LR during camera motion absorbs small objects into background.
-        // Cap LR to prevent MOG2 from treating the object as shifted background.
+        // Proportional to camera motion — even slow servo tracking needs faster absorption
         double lr;
         if (warmupFrames_ > 0) {
             lr = 0.5;               // Fast background learning after init/reinit
             warmupFrames_--;
         } else if (forcedLR > 0.0) {
-            lr = forcedLR;          // Servo-settle override
+            lr = forcedLR;          // Servo-settle override: quickly absorb new background
+        } else if (flowMag > 15.0f) {
+            lr = 0.05;              // Large camera motion
+            framesSinceMotion_ = 0;
         } else if (flowMag > 2.0f) {
-            lr = 0.008;             // Camera moving: gentle LR, don't absorb small object
+            lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
             framesSinceMotion_ = 0;
         } else if (framesSinceMotion_ < 5) {
-            lr = 0.004;             // Post-motion transition
+            lr = 0.01;              // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.001;             // Fully stable: object stays foreground
+            lr = 0.003;             // Fully stable: object stays foreground
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -687,7 +689,7 @@ public:
 
         // === FG PIXEL GATE ===
         // Very high fg = whole-frame shift (scan step). Skip frame but don't damage state.
-        if (rawFG > 320000) {
+        if (rawFG > 80000) {
             lastRawContours_ = 0;
             return d;
         }
@@ -732,10 +734,10 @@ public:
             }
 
             if (!atEdge &&
-                area >= 12.0 && area <= 6000.0 &&
+                area >= 3.0 && area <= 1500.0 &&
                 solidity > 0.2 &&
-                bbox.width >= 4 && bbox.height >= 4 &&
-                bbox.width <= 200 && bbox.height <= 200 &&
+                bbox.width >= 2 && bbox.height >= 2 &&
+                bbox.width <= 100 && bbox.height <= 100 &&
                 aspectRatio > 0.12 && aspectRatio < 8.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
@@ -1104,19 +1106,6 @@ public:
                 double v2 = kf_.statePost.at<double>(2) * kf_.statePost.at<double>(2)
                           + kf_.statePost.at<double>(3) * kf_.statePost.at<double>(3);
                 velocityVariance_ = 0.8 * velocityVariance_ + 0.2 * v2;
-            } else if (missCount_ > 10 && !meas.empty()) {
-                // Measurement outside gate but we've been missing too long.
-                // Force re-init at measurement position to break the miss spiral.
-                kf_.statePost.at<double>(0) = meas[0].x;
-                kf_.statePost.at<double>(1) = meas[0].y;
-                // Keep velocity estimate but damp it
-                kf_.statePost.at<double>(2) *= 0.3;
-                kf_.statePost.at<double>(3) *= 0.3;
-                kf_.statePost.at<double>(4) = 0;
-                kf_.statePost.at<double>(5) = 0;
-                cv::setIdentity(kf_.errorCovPost, cv::Scalar(100.0));
-                missCount_ = 0;
-                confidence_ = 0.5;
             } else { handleMiss(); }
         } else { handleMiss(); }
 
@@ -1142,15 +1131,6 @@ public:
     double getConfidence() const { return confidence_; }
     double getVelocityVariance() const { return velocityVariance_; }
     int getMissCount() const    { return missCount_; }
-
-    // Compensate Kalman state for camera motion (servo-induced pixel shift)
-    void compensateCamera(double dx, double dy) {
-        if (!initialized_) return;
-        kf_.statePost.at<double>(0) += dx;
-        kf_.statePost.at<double>(1) += dy;
-        kf_.statePre.at<double>(0) += dx;
-        kf_.statePre.at<double>(1) += dy;
-    }
 
     double getGateSize() const {
         if (!initialized_) return 1e9;  // Accept ANY measurement for first contact
@@ -1573,7 +1553,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // MOG2 MUST always see the same viewpoint for stable background model.
         // ROI crop caused model instability (different content → alternating fg).
         cv::Mat resized;
-        const int DET_W = 960, DET_H = 540;
+        const int DET_W = 480, DET_H = 270;
         const double scX = (double)f.frame.cols / DET_W;
         const double scY = (double)f.frame.rows / DET_H;
         cv::resize(f.frame, resized, cv::Size(DET_W, DET_H), 0, 0, cv::INTER_LINEAR);
@@ -1592,15 +1572,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 80.0f;  // 80px in det space = 160px full-frame
+        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: >5 objects means noise burst — but allow if spatial gating is active
-        // (spatial proximity gate already filters far-away noise, so we can trust the result)
-        if ((int)d.all_boxes.size() > 5 && lastKnownX < 0) {
+        // Noise gate: even with spatial filter, >5 objects means noise burst
+        if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
         }
@@ -1628,9 +1607,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             && prevGrayFull.size() == grayFull.size()) {
             float motionMag = 0;
             cv::Rect detRect(d.box_x, d.box_y, d.box_w, d.box_h);
-            // Skip motion filter for small objects — feature tracking unreliable on <20x20px
-            bool smallObject = (detRect.width * detRect.height < 400);
-            if (!smallObject && !motionFilter.validate(prevGrayFull, grayFull, detRect, motionMag))
+            if (!motionFilter.validate(prevGrayFull, grayFull, detRect, motionMag))
                 d.valid = false;   // static ghost → reject
         }
         prevGrayFull = grayFull;
@@ -1795,19 +1772,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
-
-            // Compensate spatial gate + Kalman for camera-induced pixel shift
-            double deltaYaw   = yawDeg - lastYawDeg;
-            double deltaPitch = pitchDeg - lastPitchDeg;
-            const double PX_PER_DEG = 1.0 / DEG_PER_PX;  // ~25.4 px/deg
-            double shiftX = -deltaYaw   * PX_PER_DEG;  // camera right → objects shift left
-            double shiftY = -deltaPitch * PX_PER_DEG;
-            if (lastKnownX >= 0) {
-                lastKnownX += shiftX;
-                lastKnownY += shiftY;
-            }
-            tracker.compensateCamera(shiftX, shiftY);
-
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             servoSettleCounter = SERVO_SETTLE_FRAMES;
@@ -1828,9 +1792,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 coastVyDeg = std::clamp(coastVyDeg, -1.0, 1.0);
             }
             // Coast: continue moving servo along predicted trajectory
-            // Start after 10 frames (give detection a chance), decay velocity fast
-            if (framesWithoutDetection > 10 && framesWithoutDetection < 40) {
-                double decay = std::max(0.0, 1.0 - (framesWithoutDetection - 10) / 30.0);
+            // Start after 15 frames (give detection a chance), decay velocity gradually
+            if (framesWithoutDetection > 15 && framesWithoutDetection < 120) {
+                double decay = std::max(0.0, 1.0 - (framesWithoutDetection - 15) / 105.0);
                 double cYaw  = coastVxDeg * decay;
                 double cPitch = coastVyDeg * decay;
                 if (std::abs(cYaw) > 0.01 || std::abs(cPitch) > 0.01) {
@@ -1838,17 +1802,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     double newPitch = std::clamp(lastPitchDeg + cPitch, 5.0, 175.0);
                     setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(newYaw));
                     setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(newPitch));
-
-                    // Compensate spatial gate for coast-induced camera shift
-                    const double PX_PER_DEG_C = 1920.0 / 72.0 / 1.05;
-                    double coastShiftX = -(newYaw - lastYawDeg) * PX_PER_DEG_C;
-                    double coastShiftY = -(newPitch - lastPitchDeg) * PX_PER_DEG_C;
-                    if (lastKnownX >= 0) {
-                        lastKnownX += coastShiftX;
-                        lastKnownY += coastShiftY;
-                    }
-                    tracker.compensateCamera(coastShiftX, coastShiftY);
-
                     lastYawDeg = newYaw;
                     lastPitchDeg = newPitch;
                 }
@@ -2278,15 +2231,3 @@ void killPreviousInstances() {
 }
 
 //https://github.com/biatech665696-ai/gimbal-arducam.git
-//При запуске MOG2 модель пустая → весь кадр = foreground (513K пикселей)
-//flowMag = 0 (камера стоит) → lr = 0.001 (самый медленный)
-//При lr=0.001 нужно 1000 кадров (67 секунд!) чтобы fg < 320000 и начать детектировать
-//Все это время FG gate блокирует детекцию
-//Все это время FG gate блокирует детекцию
-//И да — это может быть причиной многих «потерь детекции»
-//во время работы: если MOG2 по какой-то причине ресетится или сильно сбивается,
-// он снова входит в это состояние.
-//Проблема ясна. При каждом reinitBGS() (запуск, смена режима, шаг скана)
-// MOG2 обнуляется и при lr=0.001 ему нужно ~1000 кадров чтобы выучить фон.
-// Всё это время детекция заблокирована.
-//Исправлю: добавлю warmup фазу — первые 50 кадров lr=0.5, потом нормальный адаптивный режим.

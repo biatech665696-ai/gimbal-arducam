@@ -567,6 +567,7 @@ public:
         , prevRawFG_(0)
         , cooldownFrames_(0)
         , postCooldownLR_(0)
+        , warmupFrames_(50)
     {
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
@@ -586,6 +587,7 @@ public:
         prevRawFG_ = 0;
         cooldownFrames_ = 0;
         postCooldownLR_ = 0;
+        warmupFrames_ = 50;
     }
     void resetCounters()
     {
@@ -657,7 +659,10 @@ public:
         // Key insight: high LR during camera motion absorbs small objects into background.
         // Cap LR to prevent MOG2 from treating the object as shifted background.
         double lr;
-        if (forcedLR > 0.0) {
+        if (warmupFrames_ > 0) {
+            lr = 0.5;               // Fast background learning after init/reinit
+            warmupFrames_--;
+        } else if (forcedLR > 0.0) {
             lr = forcedLR;          // Servo-settle override
         } else if (flowMag > 2.0f) {
             lr = 0.008;             // Camera moving: gentle LR, don't absorb small object
@@ -809,6 +814,7 @@ private:
     int prevRawFG_;
     int cooldownFrames_;  // frames since last FG gate/noise gate
     int postCooldownLR_;  // frames of elevated LR after cooldown ends
+    int warmupFrames_;    // frames of fast LR after init/reinit
 };
 
 /* =============== 2. MULTI-SCALE COARSE DETECTION =============== */
@@ -2272,3 +2278,15 @@ void killPreviousInstances() {
 }
 
 //https://github.com/biatech665696-ai/gimbal-arducam.git
+//При запуске MOG2 модель пустая → весь кадр = foreground (513K пикселей)
+//flowMag = 0 (камера стоит) → lr = 0.001 (самый медленный)
+//При lr=0.001 нужно 1000 кадров (67 секунд!) чтобы fg < 320000 и начать детектировать
+//Все это время FG gate блокирует детекцию
+//Все это время FG gate блокирует детекцию
+//И да — это может быть причиной многих «потерь детекции»
+//во время работы: если MOG2 по какой-то причине ресетится или сильно сбивается,
+// он снова входит в это состояние.
+//Проблема ясна. При каждом reinitBGS() (запуск, смена режима, шаг скана)
+// MOG2 обнуляется и при lr=0.001 ему нужно ~1000 кадров чтобы выучить фон.
+// Всё это время детекция заблокирована.
+//Исправлю: добавлю warmup фазу — первые 50 кадров lr=0.5, потом нормальный адаптивный режим.

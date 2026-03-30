@@ -581,6 +581,13 @@ public:
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
+    // Reset cumulative affine after intentional camera motion (servo)
+    // so cumShift doesn't accumulate and trigger reinitBGS()
+    void resetCumulativeAffine() {
+        cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
+        modelSpaceValid_ = false;
+    }
+
     void reinitBGS() {
         mog2_ = cv::createBackgroundSubtractorMOG2(500, 30.0, false);
         mog2_->setNMixtures(5);
@@ -1871,6 +1878,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             servoSettleCounter = settle;
+
+            // Servo moved camera intentionally — reset cumulative affine
+            // so this planned motion doesn't accumulate in cumShift
+            // and trigger reinitBGS() (50-frame blind warmup)
+            detector.resetCumulativeAffine();
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

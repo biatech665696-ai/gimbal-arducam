@@ -654,21 +654,19 @@ public:
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Proportional to camera motion — even slow servo tracking needs faster absorption
+        // Key insight: high LR during camera motion absorbs small objects into background.
+        // Cap LR to prevent MOG2 from treating the object as shifted background.
         double lr;
         if (forcedLR > 0.0) {
-            lr = forcedLR;          // Servo-settle override: quickly absorb new background
-        } else if (flowMag > 15.0f) {
-            lr = 0.05;              // Large camera motion
-            framesSinceMotion_ = 0;
+            lr = forcedLR;          // Servo-settle override
         } else if (flowMag > 2.0f) {
-            lr = 0.005 + 0.01 * flowMag;  // Proportional: 2px→0.025, 10px→0.105
+            lr = 0.008;             // Camera moving: gentle LR, don't absorb small object
             framesSinceMotion_ = 0;
         } else if (framesSinceMotion_ < 5) {
-            lr = 0.005;             // Post-motion transition (gentle)
+            lr = 0.004;             // Post-motion transition
             framesSinceMotion_++;
         } else {
-            lr = 0.001;             // Fully stable: small object stays foreground longer
+            lr = 0.001;             // Fully stable: object stays foreground
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -1100,6 +1098,19 @@ public:
                 double v2 = kf_.statePost.at<double>(2) * kf_.statePost.at<double>(2)
                           + kf_.statePost.at<double>(3) * kf_.statePost.at<double>(3);
                 velocityVariance_ = 0.8 * velocityVariance_ + 0.2 * v2;
+            } else if (missCount_ > 10 && !meas.empty()) {
+                // Measurement outside gate but we've been missing too long.
+                // Force re-init at measurement position to break the miss spiral.
+                kf_.statePost.at<double>(0) = meas[0].x;
+                kf_.statePost.at<double>(1) = meas[0].y;
+                // Keep velocity estimate but damp it
+                kf_.statePost.at<double>(2) *= 0.3;
+                kf_.statePost.at<double>(3) *= 0.3;
+                kf_.statePost.at<double>(4) = 0;
+                kf_.statePost.at<double>(5) = 0;
+                cv::setIdentity(kf_.errorCovPost, cv::Scalar(100.0));
+                missCount_ = 0;
+                confidence_ = 0.5;
             } else { handleMiss(); }
         } else { handleMiss(); }
 
@@ -1125,6 +1136,15 @@ public:
     double getConfidence() const { return confidence_; }
     double getVelocityVariance() const { return velocityVariance_; }
     int getMissCount() const    { return missCount_; }
+
+    // Compensate Kalman state for camera motion (servo-induced pixel shift)
+    void compensateCamera(double dx, double dy) {
+        if (!initialized_) return;
+        kf_.statePost.at<double>(0) += dx;
+        kf_.statePost.at<double>(1) += dy;
+        kf_.statePre.at<double>(0) += dx;
+        kf_.statePre.at<double>(1) += dy;
+    }
 
     double getGateSize() const {
         if (!initialized_) return 1e9;  // Accept ANY measurement for first contact
@@ -1769,6 +1789,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+
+            // Compensate spatial gate + Kalman for camera-induced pixel shift
+            double deltaYaw   = yawDeg - lastYawDeg;
+            double deltaPitch = pitchDeg - lastPitchDeg;
+            const double PX_PER_DEG = 1.0 / DEG_PER_PX;  // ~25.4 px/deg
+            double shiftX = -deltaYaw   * PX_PER_DEG;  // camera right → objects shift left
+            double shiftY = -deltaPitch * PX_PER_DEG;
+            if (lastKnownX >= 0) {
+                lastKnownX += shiftX;
+                lastKnownY += shiftY;
+            }
+            tracker.compensateCamera(shiftX, shiftY);
+
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             servoSettleCounter = SERVO_SETTLE_FRAMES;
@@ -1799,6 +1832,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     double newPitch = std::clamp(lastPitchDeg + cPitch, 5.0, 175.0);
                     setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(newYaw));
                     setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(newPitch));
+
+                    // Compensate spatial gate for coast-induced camera shift
+                    const double PX_PER_DEG_C = 1920.0 / 72.0 / 1.05;
+                    double coastShiftX = -(newYaw - lastYawDeg) * PX_PER_DEG_C;
+                    double coastShiftY = -(newPitch - lastPitchDeg) * PX_PER_DEG_C;
+                    if (lastKnownX >= 0) {
+                        lastKnownX += coastShiftX;
+                        lastKnownY += coastShiftY;
+                    }
+                    tracker.compensateCamera(coastShiftX, coastShiftY);
+
                     lastYawDeg = newYaw;
                     lastPitchDeg = newPitch;
                 }

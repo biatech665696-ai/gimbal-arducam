@@ -1825,18 +1825,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double absDist = std::sqrt(ex * ex + ey * ey);
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            // Half of ROI size as threshold for "close" zone
-            cv::Rect roi = dynROI.getROI();
-            double halfROI = std::min(roi.width, roi.height) * 0.5;
+            // Fixed threshold for "close" zone: ~150px (~quarter frame)
+            const double CLOSE_THRESHOLD = 150.0;
 
             int settle;
-            if (absDist < halfROI) {
+            if (absDist < CLOSE_THRESHOLD) {
                 // Close zone: adopt object's absolute angular coordinates
                 // Object at pixel (d.x, d.y) → its absolute angle =
                 //   currentServo + (pixel - center) * DEG_PER_PX
                 yawDeg   = std::clamp(lastYawDeg   - ex * DEG_PER_PX, 5.0, 175.0);
                 pitchDeg = std::clamp(lastPitchDeg - ey * DEG_PER_PX, 5.0, 175.0);
                 settle = 0;
+                // Servo locked on — disable ROI so it doesn't interfere
+                dynROI.reset();
             } else {
                 // Far zone: conservative approach (same as d3ce9b7)
                 double corrYaw   = -ex * DEG_PER_PX * 0.35;

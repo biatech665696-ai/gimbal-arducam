@@ -1027,17 +1027,22 @@ private:
             return;
         }
         double padFactor = 4.0;
-        double speed = std::sqrt(vx_ * vx_ + vy_ * vy_);
-        padFactor += std::min(speed * 0.02, 3.0);  // cap speed contribution
-        if (confidence_ < 0.5) padFactor *= (1.0 + (0.5 - confidence_));  // gentler expansion
-        padFactor += framesSinceDetection_ * 0.3;
-        padFactor = std::min(padFactor, 10.0);  // absolute cap
+        if (framesSinceDetection_ > 0) {
+            // Only expand for velocity when object is lost (need wider search area)
+            double speed = std::sqrt(vx_ * vx_ + vy_ * vy_);
+            padFactor += std::min(speed * 0.02, 3.0);
+            padFactor += framesSinceDetection_ * 0.3;
+        }
+        if (confidence_ < 0.5) padFactor *= (1.0 + (0.5 - confidence_));
+        padFactor = std::min(padFactor, 10.0);
 
         int minSz = 120, maxSz = std::min(frameW_, frameH_) * 3 / 4;
         roiW_ = std::clamp((int)(std::max(objW_, 20) * padFactor), minSz, maxSz);
         roiH_ = std::clamp((int)(std::max(objH_, 20) * padFactor), minSz, maxSz);
 
-        double leadX = vx_ * 0.05, leadY = vy_ * 0.05;
+        // Lead ROI ahead only when predicting during loss, not during active tracking
+        double leadX = (framesSinceDetection_ > 0) ? vx_ * 0.05 : 0.0;
+        double leadY = (framesSinceDetection_ > 0) ? vy_ * 0.05 : 0.0;
         double alpha = (framesSinceDetection_ < 3) ? 0.7 : 0.3;
         double cx = alpha * (targetX_ + leadX) + (1.0 - alpha) * (roiX_ + roiW_ / 2.0);
         double cy = alpha * (targetY_ + leadY) + (1.0 - alpha) * (roiY_ + roiH_ / 2.0);
@@ -1820,12 +1825,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double corrYaw, corrPitch;
             int settle;
             if (absDist < halfROI) {
-                // Close zone: correct 80% of remaining error, small clamp
-                corrYaw   = -ex * DEG_PER_PX * 0.80;
-                corrPitch = -ey * DEG_PER_PX * 0.80;
-                corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
-                corrPitch = std::clamp(corrPitch, -2.0, 2.0);
-                settle = 0;  // no waiting — rapid small corrections
+                // Close zone: velocity feedforward + position error correction
+                // Servo moves WITH object velocity, plus small error correction
+                // state.vx/vy are px/s; convert to deg/frame (@~17fps)
+                double velYawDeg   = -state.vx * DEG_PER_PX / 17.0;
+                double velPitchDeg = -state.vy * DEG_PER_PX / 17.0;
+                velYawDeg   = std::clamp(velYawDeg,   -1.5, 1.5);
+                velPitchDeg = std::clamp(velPitchDeg, -1.5, 1.5);
+                // Error correction: small gain to gently center
+                double errYaw   = -ex * DEG_PER_PX * 0.30;
+                double errPitch = -ey * DEG_PER_PX * 0.30;
+                errYaw   = std::clamp(errYaw,   -1.0, 1.0);
+                errPitch = std::clamp(errPitch, -1.0, 1.0);
+                corrYaw   = velYawDeg + errYaw;
+                corrPitch = velPitchDeg + errPitch;
+                corrYaw   = std::clamp(corrYaw,   -2.5, 2.5);
+                corrPitch = std::clamp(corrPitch, -2.5, 2.5);
+                settle = 0;  // no waiting — continuous tracking
             } else {
                 // Far zone: conservative approach (same as d3ce9b7)
                 corrYaw   = -ex * DEG_PER_PX * 0.35;

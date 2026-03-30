@@ -1209,17 +1209,18 @@ private:
 
     void handleMiss() {
         missCount_++;
-        confidence_ = std::max(0.0, confidence_ - 0.05);
-        kf_.statePost.at<double>(4) *= 0.85;
-        kf_.statePost.at<double>(5) *= 0.85;
-        if (missCount_ > 15) {
-            kf_.statePost.at<double>(2) *= 0.95;
-            kf_.statePost.at<double>(3) *= 0.95;
+        confidence_ = std::max(0.0, confidence_ - 0.15);  // fast decay: 1.0→0 in 7 frames
+        kf_.statePost.at<double>(4) *= 0.7;  // aggressive velocity damping
+        kf_.statePost.at<double>(5) *= 0.7;
+        if (missCount_ > 5) {
+            // After 5 misses, also damp position prediction
+            kf_.statePost.at<double>(2) *= 0.8;
+            kf_.statePost.at<double>(3) *= 0.8;
         }
-        kf_.errorCovPost.at<double>(0, 0) += 10.0;
-        kf_.errorCovPost.at<double>(1, 1) += 10.0;
-        // Auto-reset after prolonged loss — allows re-initialization from next detection
-        if (missCount_ > 45) {
+        kf_.errorCovPost.at<double>(0, 0) += 20.0;
+        kf_.errorCovPost.at<double>(1, 1) += 20.0;
+        // Auto-reset after short loss — don't coast into noise
+        if (missCount_ > 20) {
             reset();
         }
     }
@@ -1598,8 +1599,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Expand search radius when losing detections — progressive widening
             if (framesWithoutDetection > 3)
                 searchRad = 60.0f + framesWithoutDetection * 5.0f;
-            if (searchRad > 200.0f || framesWithoutDetection > 15)
-                searchPt = cv::Point2f(-1, -1);  // full-frame fallback earlier
+            if (searchRad > 200.0f || framesWithoutDetection > 8)
+                searchPt = cv::Point2f(-1, -1);  // full-frame fallback fast
         }
         // With warm-up phase in MOG2, forcedLR is not needed.
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
@@ -1779,8 +1780,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Coast with Kalman prediction — only briefly, with high confidence
             lastKnownX = state.x;
             lastKnownY = state.y;
-        } else if (tracker.getMissCount() > 15) {
-            // Lost object — reset spatial gating sooner, allow full-frame search
+        } else if (tracker.getMissCount() > 8) {
+            // Lost object — reset spatial gating fast, allow full-frame search
             lastKnownX = -1;
             lastKnownY = -1;
         }

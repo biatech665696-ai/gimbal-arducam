@@ -1238,7 +1238,7 @@ private:
     }
 
     void setQ(double dt) {
-        double q = 200.0;
+        double q = 30.0;
         double dt2 = dt * dt, dt3 = dt2 * dt, dt4 = dt3 * dt, dt5 = dt4 * dt;
         cv::Mat Q = cv::Mat::zeros(6, 6, CV_64F);
         Q.at<double>(0, 0) = dt5 / 20; Q.at<double>(1, 1) = dt5 / 20;
@@ -1630,6 +1630,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static int consecutiveValid = 0;  // for servo correction gating
         static int framesWithoutDetection = 0;  // for return-to-center
         static double prevErrX = 0, prevErrY = 0;  // for PD controller D-term
+        static double filtErrX = 0, filtErrY = 0;  // EMA-filtered error
         if (resetSpatialGating) {
             lastKnownX = -1; lastKnownY = -1;
             servoSettleCounter = 0;
@@ -1814,6 +1815,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             framesWithoutDetection++;
             if (framesWithoutDetection > 5) {
                 prevErrX = 0; prevErrY = 0;  // reset D-term only after extended loss
+                filtErrX = 0; filtErrY = 0;  // reset EMA filter too
             }
         }
 
@@ -1846,28 +1848,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            // Soft deadband: scale down small errors smoothly (no limit cycle)
-            double dist = std::sqrt(ex*ex + ey*ey);
-            const double SOFT_DEAD = 12.0; // pixels
-            if (dist > 0.1 && dist < SOFT_DEAD) {
-                double scale = (dist / SOFT_DEAD) * (dist / SOFT_DEAD); // quadratic ramp
-                ex *= scale;
-                ey *= scale;
-            }
+            // EMA filter on error: smooth out measurement noise + break feedback oscillation
+            // alpha=0.4 → ~60% of previous, delays response ~1 frame but kills oscillation
+            const double ALPHA = 0.4;
+            filtErrX = ALPHA * ex + (1.0 - ALPHA) * filtErrX;
+            filtErrY = ALPHA * ey + (1.0 - ALPHA) * filtErrY;
 
-            // D-term: derivative of error (change since last frame)
-            double dex = ex - prevErrX;
-            double dey = ey - prevErrY;
-            prevErrX = ex;
-            prevErrY = ey;
+            // D-term: derivative of filtered error
+            double dex = filtErrX - prevErrX;
+            double dey = filtErrY - prevErrY;
+            prevErrX = filtErrX;
+            prevErrY = filtErrY;
 
-            // PD controller: Kp=0.45, Kd=0.35
-            // Kp × error drives toward object
-            // Kd × d(error) dampens oscillation (resists rapid error changes)
-            double Kp = 0.45;
-            double Kd = 0.35;
-            double corrYaw   = -(ex * Kp + dex * Kd) * DEG_PER_PX;
-            double corrPitch = -(ey * Kp + dey * Kd) * DEG_PER_PX;
+            // PD controller on filtered error: Kp=0.40, Kd=0.25
+            double Kp = 0.40;
+            double Kd = 0.25;
+            double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
+            double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
             corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
             corrPitch = std::clamp(corrPitch, -2.0, 2.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);

@@ -101,6 +101,130 @@ void killPreviousInstances();
  *      Anti-windup на интеграле предотвращает перерегулирование.
  *
  * ===========================================================================================
+ *
+ * CHANGELOG (все изменения с момента создания файла)
+ * ===========================================================================================
+ *
+ * --- ФАЗА 1: Начальный трекер (602d4d6) ---
+ *   • Gimbal tracking: Arducam 64MP + servo control + MOG2 detection
+ *   • MOG2 history 500→120→50, warmup 20 кадров
+ *   • Settle suppression: 12 кадров после каждого шага серво
+ *   • Визуализация: trajectory (blue→red trail), servo AIM marker (yellow cross)
+ *   • Fix aspect ratio: нормализация обоих осей по cx
+ *
+ * --- ФАЗА 2: Калман и серво (Kalman tuning) ---
+ *   • 6-state Kalman [x,y,vx,vy,ax,ay] + JPDA ассоциация
+ *   • Velocity weight: 0.1 → 0.5 → 0.3 → 0.2 → 0.15 → 0.12 → 0.115 → 0.15 → 0.12
+ *   • SYSTEM_DELAY: 0.35 → 0.20 → 0.05 → 0.045 → 0.02
+ *   • Settle frames: 9 → 5 → 7 → 8 → 9 (оптимум)
+ *   • Settle LR: 0.5 → 0.7 → 0.0 (freeze) → 0.5
+ *   • Anti-windup на интеграле PID
+ *
+ * --- ФАЗА 3: Серво стабилизация ---
+ *   • DualLoopServo PID → unified P-regulator (убрано PID — осцилляции)
+ *   • Gain: 1.2 → 1.5 → 2.0 → 2.5 → 3.0 → adaptive 3.0→1.2
+ *   • MAX_STEP_DEG: 8 → 30 → 15 → 20
+ *   • PROP_GAIN: 0.4 → 0.5 → 0.6 → 0.7 → 0.4 (овершут при 0.7)
+ *   • Proportional servo: step = 0.7*error, capped
+ *   • Slew limiter 2.5°/кадр
+ *
+ * --- ФАЗА 4: Компенсация наклона и люфта ---
+ *   • PITCH_BACKLASH: 3 → 6 → 10 → 20°, затем УБРАН (вызывал осцилляции)
+ *   • YAW_BACKLASH: 5°, затем УБРАН
+ *   • Pitch gravity compensation 8% → 15%
+ *   • Separate SYSTEM_DELAY_V для вертикали
+ *   • Servo limits расширены 30-150 → 0-180°
+ *
+ * --- ФАЗА 5: Adaptive ROI ---
+ *   • Adaptive ROI: 400px поиск → 4× размер объекта при захвате
+ *   • Убрано EMA-сглаживание позиции ROI
+ *   • Velocity arrow (yellow) + raw pixel delta arrow (green)
+ *
+ * --- ФАЗА 6: Методы детекции (эксперименты) ---
+ *   • MOG2 → optical flow (fdbf6e8) → motion-compensated frame diff (c8d42c1)
+ *   • Warped background model (9ffd9cb)
+ *   • Dense OF → sparse LK flow
+ *   • OF thresholds: INDEPENDENT 1.0→3.0, FLOW 1.5→3.0
+ *   • Вернулись к MOG2 (d4a9873): OF слишком шумный
+ *
+ * --- ФАЗА 7: Anti-noise + пространственный гейтинг ---
+ *   • Noise gate: 5 → 20 → 50 → 15 → 5 → 3
+ *   • FG gate: 500 → 2000 → 15000 → 50000
+ *   • Spatial gating: поиск в радиусе 60px от последней детекции
+ *   • Consecutive detections: MIN_DETECTIONS 1 → 2 → 3 → 2 → 1
+ *   • Cooldown + OF validation
+ *   • varThreshold: 16 → 30 → 45 → 38
+ *
+ * --- ФАЗА 8: Стриминг и управление ---
+ *   • HTTP MJPEG сервер на порту 8080 (заменил GStreamer UDP H.264)
+ *   • Разрешение стрима: 960×540 → 1600×900
+ *   • Удалённое управление: Q/ESC quit, F toggle mode, S scan, T trajectory
+ *   • Клик-кнопки + XMLHttpRequest для remote control
+ *   • Scan mode: 0-180°, 30° шаг, 1с dwell
+ *
+ * --- ФАЗА 9: Предиктивное управление серво ---
+ *   • Velocity coasting: серво продолжает движение при потере (УБРАНО — шумно)
+ *   • Coast prediction на основе Kalman velocity (УБРАНО — шумно)
+ *   • Coast prediction восстановлено (88d58fb) — затухание 105 кадров
+ *   • Predictive servo: прицеливание на предсказанную точку через SYSTEM_DELAY
+ *   • 10-stage pipeline (5152e0b): документация архитектуры
+ *
+ * --- ФАЗА 10: Headless mode + X11 fix ---
+ *   • Headless mode: auto-detect no display, skip imshow, poll(stdin)
+ *   • X11 fix: auto-set DISPLAY=:0 и XAUTHORITY через sudo
+ *   • Сокращение coast prediction lifetime (предотвращение дрейфа серво)
+ *
+ * --- ФАЗА 11: Anti-feedback fixes ---
+ *   • FG gate <200 на коррекции серво (разрыв feedback loop)
+ *   • Move-and-settle: 3°/коррекция + 3 кадра на settle (lr=0.5)
+ *   • Faster servo: gain 0.15→0.5, clamp 0.3→1.5°/frame
+ *   • Adaptive LR: proportional 0.025-0.15 при движении, stable 0.003
+ *   • Predictive threshold: 0.01→0.7
+ *
+ * --- ФАЗА 12: MOG2 revolution — motion-compensated (d3ce9b7 GOLD) ---
+ *   • ★ Warp frame в координаты модели MOG2 перед apply()
+ *   • Фон стабилен для MOG2 — только реальный объект = foreground
+ *   • Постоянный lr=0.003 (адаптивный LR больше не нужен)
+ *   • Маска border artifacts от варпинга
+ *   • Suppress all objects except best (clear all_boxes)
+ *   • Cap motion LR at 0.005 (защита 2-3px объекта от поглощения)
+ *   • Freeze MOG2 при движении камеры (lr=0)
+ *
+ * --- ФАЗА 13: Пост-gold baseline эксперименты ---
+ *   • Revert к bb7f263 + MOG2 warmup (lr=0.5, 50 кадров)
+ *   • Shorten Kalman coast: reset 45→15, conf decay 3×, vel damp 0.7
+ *   • Reject коррекций >400px от центра (edge artifacts)
+ *   • Core fix: motion-compensated frame differencing при fg>5%
+ *   • Double resolution 480×270 → 960×540 (УБРАНО — вернули к 480×270)
+ *   • Fix spatial gate: компенсация за motion серво
+ *   • Kalman camera compensation (compensateCamera)
+ *
+ * --- ФАЗА 14: Soft affine reset + зоны серво (3031730) ---
+ *   • Soft affine reset: cumShift>150 → reset affine, сохранить MOG2
+ *   • Three-zone servo: far 35%, close 70%, lock <50px = direct angular coords
+ *   • ROI suspend/resume: отключение ROI при захвате серво
+ *   • ROI snap: без EMA — ROI = позиция объекта точно при детекции
+ *   • notifyServoMove() — предотвращение reinitBGS при трекинге
+ *
+ * --- ФАЗА 15: Single-zone + PD контроллер ---
+ *   • Single-zone servo: 45%/±1.8°/settle=1 (fix overshoot от 3 зон)
+ *   • ROI snap + faster servo 55%/settle=0 + spatial gate compensation
+ *   • Убраны конфликтующие модули: Kalman coast + coast servo
+ *   • Zone-based Kalman bypass: <150px = raw detection, >=150px = Kalman
+ *   • PD controller: Kp=0.40, Kd=0.25
+ *
+ * --- ФАЗА 16: Тонкая настройка PD + борьба с осцилляциями ---
+ *   • Kp: 0.40 → 0.48 (лаг) → 0.45 → 0.40 (осцилляции)
+ *   • Kd: 0.25 → 0.35 → 0.25 (осцилляции не изменились от Kd)
+ *   • Hard deadband 15px (УБРАНО — limit cycle)
+ *   • Soft quadratic deadband (УБРАНО в пользу EMA)
+ *   • Kalman: q 500→200→30, R 4→16, velocity clamp ±500px/s, accel ±200px/s²
+ *   • D-term: сохраняется при потере <5 кадров, reset при >5
+ *   • ★ EMA filter на ошибке: alpha=0.4, filtErr = 0.4*err + 0.6*prev
+ *   • Текущее состояние (765b6f0): Kp=0.40, Kd=0.25, EMA alpha=0.4
+ *   • Осцилляции серво в пределах ROI — НЕ РЕШЕНО
+ *
+ * ===========================================================================================
  */
 
 using namespace std;
@@ -1550,6 +1674,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     auto noDetectionSince = std::chrono::steady_clock::now();
     const double SCAN_START_DELAY = 3.0;  // Seconds without detection before scan starts
     bool wasScanning = false;
+    int scanSettleFrames = 0;             // Frames to ignore detections after BGS reinit during scan
 
     // === NEW PIPELINE COMPONENTS (methods 2-10) ===
     MultiScaleDetector multiScale;
@@ -1745,9 +1870,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         double pitchDeg = lastPitchDeg;
 
         // === SCAN MODE LOGIC ===
+        if (scanSettleFrames > 0) scanSettleFrames--;
+        bool realDetection = d.valid && (scanSettleFrames <= 0);
         bool scanActive = false;
         if (scanEnabled.load() && currentTrackingEnabled) {
-            if (d.valid) {
+            if (realDetection) {
                 noDetectionSince = std::chrono::steady_clock::now();
                 if (wasScanning) {
                     std::cout << "[SCAN] Object detected! Switching to tracking." << std::endl;
@@ -1772,6 +1899,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                         scanStepTime = now;
                         detector.reinitBGS();
                         multiScale.reinit();
+                        scanSettleFrames = 5;
                         std::cout << "[SCAN] Starting scan at " << scanYawDeg
                                   << " deg (dir=" << scanDirection << ")" << std::endl;
                     }
@@ -1784,6 +1912,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                         scanStepTime = now;
                         detector.reinitBGS();
                         multiScale.reinit();
+                        scanSettleFrames = 5;
                         std::cout << "[SCAN] Step -> " << scanYawDeg
                                   << " deg (dir=" << scanDirection << ")" << std::endl;
                     }
@@ -2313,4 +2442,4 @@ void killPreviousInstances() {
     closedir(dir);
 }
 
-//https://github.com/biatech665696-ai/gimbal-arducam.git
+//https://github.com/biatech665696-ai/gimbal-arducam.git1

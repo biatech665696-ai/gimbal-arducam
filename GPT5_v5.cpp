@@ -1888,11 +1888,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
                     if (!wasScanning) {
                         wasScanning = true;
-                        scanYawDeg = 0.0;
+                        scanYawDeg = 90.0;
                         scanDirection = 1;
                         scanDwelling = true;
                         scanStepTime = now;
-                        std::cout << "[SCAN] Starting sweep at 0 deg (dir=1)" << std::endl;
+                        std::cout << "[SCAN] Starting sweep at 90 deg (dir=1)" << std::endl;
                     }
 
                     double dwellElapsed = std::chrono::duration<double>(now - scanStepTime).count();

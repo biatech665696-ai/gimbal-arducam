@@ -1674,7 +1674,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     auto noDetectionSince = std::chrono::steady_clock::now();
     const double SCAN_START_DELAY = 3.0;  // Seconds without detection before scan starts
     bool wasScanning = false;
-    int scanSettleFrames = 0;             // Frames to ignore detections after BGS reinit during scan
 
     // === NEW PIPELINE COMPONENTS (methods 2-10) ===
     MultiScaleDetector multiScale;
@@ -1870,11 +1869,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         double pitchDeg = lastPitchDeg;
 
         // === SCAN MODE LOGIC ===
-        if (scanSettleFrames > 0) scanSettleFrames--;
-        bool realDetection = d.valid && (scanSettleFrames <= 0);
         bool scanActive = false;
         if (scanEnabled.load() && currentTrackingEnabled) {
-            if (realDetection) {
+            if (d.valid) {
                 noDetectionSince = std::chrono::steady_clock::now();
                 if (wasScanning) {
                     std::cout << "[SCAN] Object detected! Switching to tracking." << std::endl;
@@ -1891,28 +1888,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
                     if (!wasScanning) {
                         wasScanning = true;
-                        scanYawDeg = std::round(lastYawDeg / SCAN_STEP) * SCAN_STEP;
-                        if (scanYawDeg < 0) scanYawDeg = 0;
-                        if (scanYawDeg > 180) scanYawDeg = 180;
-                        scanDirection = (scanYawDeg >= 90.0) ? 1 : -1;
+                        scanYawDeg = 0.0;
+                        scanDirection = 1;
                         scanDwelling = true;
                         scanStepTime = now;
-                        detector.reinitBGS();
-                        multiScale.reinit();
-                        scanSettleFrames = 5;
-                        std::cout << "[SCAN] Starting scan at " << scanYawDeg
-                                  << " deg (dir=" << scanDirection << ")" << std::endl;
+                        std::cout << "[SCAN] Starting sweep at 0 deg (dir=1)" << std::endl;
                     }
 
                     double dwellElapsed = std::chrono::duration<double>(now - scanStepTime).count();
                     if (scanDwelling && dwellElapsed >= SCAN_DWELL_SEC) {
                         scanYawDeg += scanDirection * SCAN_STEP;
-                        if (scanYawDeg > 180.0) { scanYawDeg = 180.0; scanDirection = -1; }
-                        else if (scanYawDeg < 0.0) { scanYawDeg = 0.0; scanDirection = 1; }
+                        if (scanYawDeg >= 180.0) { scanYawDeg = 180.0; scanDirection = -1; }
+                        else if (scanYawDeg <= 0.0) { scanYawDeg = 0.0; scanDirection = 1; }
                         scanStepTime = now;
-                        detector.reinitBGS();
-                        multiScale.reinit();
-                        scanSettleFrames = 5;
                         std::cout << "[SCAN] Step -> " << scanYawDeg
                                   << " deg (dir=" << scanDirection << ")" << std::endl;
                     }

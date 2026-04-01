@@ -756,8 +756,11 @@ public:
                 std::vector<cv::Point2f> currPts;
                 std::vector<uchar> status;
                 std::vector<float> err;
+                // Window 31×31 + 4 pyramid levels: handles up to ~20px shift per frame.
+                // Servo step 2° = 12.7px in det-space — previously exceeded 21×21 limit
+                // causing LK to return globalFlow≈0 and MOG2 to see entire background as FG.
                 cv::calcOpticalFlowPyrLK(prevGray_, gray, prevPts, currPts, status, err,
-                    cv::Size(21, 21), 3);
+                    cv::Size(31, 31), 4);
 
                 std::vector<cv::Point2f> goodPrev, goodCurr;
                 for (size_t i = 0; i < status.size(); i++) {
@@ -1082,7 +1085,7 @@ public:
         std::vector<uchar> status;
         std::vector<float> err;
         cv::calcOpticalFlowPyrLK(prevGray, currGray, pts, nextPts, status, err,
-                                  cv::Size(15, 15), 2);
+                                  cv::Size(21, 21), 3);
 
         std::vector<float> motions;
         for (size_t i = 0; i < status.size(); i++) {

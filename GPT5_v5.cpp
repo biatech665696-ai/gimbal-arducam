@@ -718,6 +718,7 @@ public:
         lastObjectRect_ = cv::Rect();
         cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
         modelSpaceValid_ = false;
+        prevFgMask_ = cv::Mat();
     }
     void resetCounters()
     {
@@ -750,7 +751,18 @@ public:
 
         if (!prevGray_.empty() && prevGray_.size() == gray.size()) {
             std::vector<cv::Point2f> prevPts;
-            cv::goodFeaturesToTrack(prevGray_, prevPts, 100, 0.01, 10);
+            // Mask out previously-detected foreground before extracting LK features.
+            // Without this mask, goodFeaturesToTrack finds points ON moving objects;
+            // LK then tracks object motion instead of camera motion → affine is wrong
+            // → MOG2 sees entire background as foreground (fg spikes to 20k+).
+            if (!prevFgMask_.empty() && prevFgMask_.size() == prevGray_.size()) {
+                cv::Mat bgMask;
+                cv::bitwise_not(prevFgMask_, bgMask);
+                cv::dilate(bgMask, bgMask, kernel3_);  // conservatively expand exclusion
+                cv::goodFeaturesToTrack(prevGray_, prevPts, 100, 0.01, 10, bgMask);
+            } else {
+                cv::goodFeaturesToTrack(prevGray_, prevPts, 100, 0.01, 10);
+            }
 
             if (prevPts.size() >= 4) {
                 std::vector<cv::Point2f> currPts;
@@ -871,6 +883,9 @@ public:
         }
 
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
+
+        // Store fg mask (current-frame coords) for next frame's LK feature masking
+        prevFgMask_ = fgMask.clone();
 
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
@@ -995,6 +1010,7 @@ private:
     cv::Rect lastObjectRect_;  // last detected object bbox (detection-frame coords)
     cv::Mat cumulativeAffine_;  // 2x3: model space → current ROI space
     bool modelSpaceValid_;
+    cv::Mat prevFgMask_;  // fg mask from previous frame (current-frame coords) for LK masking
 };
 
 /* =============== 2. MULTI-SCALE COARSE DETECTION =============== */

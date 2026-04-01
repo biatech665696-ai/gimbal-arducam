@@ -1753,6 +1753,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static double lastKnownX = -1, lastKnownY = -1;
         static int consecutiveValid = 0;  // for servo correction gating
         static int framesWithoutDetection = 0;  // for return-to-center
+        static double prevErrX = 0, prevErrY = 0;  // for PD controller D-term
+        static double filtErrX = 0, filtErrY = 0;  // EMA-filtered error
         if (resetSpatialGating) {
             lastKnownX = -1; lastKnownY = -1;
             servoSettleCounter = 0;
@@ -1929,7 +1931,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             consecutiveValid = 0;
             framesWithoutDetection++;
             if (framesWithoutDetection > 5) {
-                // (D-term/EMA vars removed — P-only + EMA-on-command)
+                prevErrX = 0; prevErrY = 0;  // reset D-term only after extended loss
+                filtErrX = 0; filtErrY = 0;  // reset EMA filter too
             }
         }
 
@@ -1944,11 +1947,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownY = -1;
         }
 
-        // === 9+10. SERVO CONTROL — P controller + EMA on command angle ===
-        // [1] EMA on command angle (not error): monotonic convergence, no limit cycle.
-        // [2] Deadband on servo step (not error): blocks micro-steps from detection jitter;
-        //     error accumulates across frames and drives a single clear step when large enough.
-        // [3] settle=2 only when servo actually moved: MOG2+LK stabilise after camera shift.
+        // === 9+10. SERVO CONTROL — PD controller with damping ===
+        // P-term: proportional to pixel error → drives toward object
+        // D-term: proportional to change in error → dampens oscillation
+        // When error is shrinking (servo converging), D reduces correction
+        // When error is growing (object escaping), D increases correction
         bool servoAllowed = false;
         if (currentTrackingEnabled && !scanActive && d.valid && servoSettleCounter <= 0) {
             if (servoClose) {
@@ -1961,34 +1964,32 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
-            const double PX_PER_DEG = 1.0 / DEG_PER_PX;
 
-            // [1] P-only controller → raw target angle
-            // EMA applied to COMMAND ANGLE (not error) — prevents limit cycle:
-            // when object is centred, raw target = current angle → EMA output
-            // converges monotonically to current without residual "ghost" error.
+            // EMA filter on error: smooth out measurement noise + break feedback oscillation
+            // alpha=0.4 → ~60% of previous, delays response ~1 frame but kills oscillation
+            const double ALPHA = 0.4;
+            filtErrX = ALPHA * ex + (1.0 - ALPHA) * filtErrX;
+            filtErrY = ALPHA * ey + (1.0 - ALPHA) * filtErrY;
+
+            // D-term: derivative of filtered error
+            double dex = filtErrX - prevErrX;
+            double dey = filtErrY - prevErrY;
+            prevErrX = filtErrX;
+            prevErrY = filtErrY;
+
+            // PD controller on filtered error: Kp=0.40, Kd=0.25
             double Kp = 0.40;
-            double rawYaw   = std::clamp(lastYawDeg   - ex * Kp * DEG_PER_PX, 5.0, 175.0);
-            double rawPitch = std::clamp(lastPitchDeg - ey * Kp * DEG_PER_PX, 5.0, 175.0);
-
-            // [1] EMA on command angle (alpha=0.35): smooth jitter without driving oscillation
-            const double ALPHA = 0.35;
-            yawDeg   = ALPHA * rawYaw   + (1.0 - ALPHA) * lastYawDeg;
-            pitchDeg = ALPHA * rawPitch + (1.0 - ALPHA) * lastPitchDeg;
-            yawDeg   = std::clamp(yawDeg,   5.0, 175.0);
-            pitchDeg = std::clamp(pitchDeg, 5.0, 175.0);
-
-            // [2] Deadband on servo STEP: suppress micro-oscillations from detection jitter.
-            // Unlike error deadband, this does not create a limit cycle — error accumulates
-            // across frames and drives a single larger step when it exceeds threshold.
-            const double MIN_SERVO_STEP_DEG = 0.10;  // ≈1.2px at full-frame scale
-            bool yawMoved   = (std::abs(yawDeg   - lastYawDeg)   >= MIN_SERVO_STEP_DEG);
-            bool pitchMoved = (std::abs(pitchDeg - lastPitchDeg) >= MIN_SERVO_STEP_DEG);
-            if (!yawMoved)   yawDeg   = lastYawDeg;
-            if (!pitchMoved) pitchDeg = lastPitchDeg;
+            double Kd = 0.25;
+            double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
+            double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
+            corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
+            corrPitch = std::clamp(corrPitch, -2.0, 2.0);
+            yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
+            pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
             // Compensate spatial gate: servo moves camera → object shifts in frame
-            double shiftX = -(yawDeg   - lastYawDeg)   * PX_PER_DEG;
+            const double PX_PER_DEG = 1.0 / DEG_PER_PX;
+            double shiftX = -(yawDeg - lastYawDeg)   * PX_PER_DEG;
             double shiftY = -(pitchDeg - lastPitchDeg) * PX_PER_DEG;
             if (lastKnownX >= 0) {
                 lastKnownX = std::clamp(lastKnownX + shiftX, 0.0, (double)(f.frame.cols - 1));
@@ -1996,14 +1997,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
 
             setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-            setServoAngle(PWM_CHANNEL_VERTICAL,   static_cast<float>(pitchDeg));
-            lastYawDeg   = yawDeg;
+            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+            lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
-
-            // [3] settle=2 only when servo actually moved: allows MOG2 background
-            // to stabilise after camera shift before next correction is computed.
-            bool servoActuallyMoved = (yawMoved || pitchMoved);
-            servoSettleCounter = servoActuallyMoved ? 2 : 0;
+            servoSettleCounter = 0;  // correct every frame
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

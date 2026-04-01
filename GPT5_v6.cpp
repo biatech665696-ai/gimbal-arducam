@@ -831,19 +831,22 @@ public:
         float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
 
         // Reset when model space drifted too far (edge artifacts dominate)
-        // Soft reset: keep MOG2 model, just reset affine + short warmup.
-        // reinitBGS() destroyed MOG2 entirely → 50 frames blind → detection lost.
-        if (cumShift > 150.0f) {
+        // Soft reset: keep MOG2 model, reset affine only.
+        // NO warmup — LK restarts from scratch; MOG2 stays at lr=0.003
+        // so the object is not absorbed. Edge mask handles border artifacts.
+        if (cumShift > 100.0f) {
             cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
             modelSpaceValid_ = false;
             prevGray_ = cv::Mat();  // force LK to restart
-            warmupFrames_ = 10;    // 10 frames at lr=0.5 to re-learn shifted background
+            // warmupFrames_ intentionally NOT set — prevents MOG2 blinding
         }
 
         double lr;
+        bool isFrozen = false;
         if (freezeFrames_ > 0) {
             lr = 0;       // freeze MOG2 during servo motion — don't absorb object
             freezeFrames_--;
+            isFrozen = true;
         } else if (warmupFrames_ > 0) {
             lr = 0.5;
             warmupFrames_--;
@@ -870,19 +873,20 @@ public:
         lastFGPixels_ = rawFG;
 
         // Spike detection: sudden FG explosion vs quiet baseline (camera pan / LK failure).
-        // Only fires during non-warmup frames (warmupFrames_==0) to avoid an infinite
-        // reset loop while MOG2 is still settling.
-        float spikeThresh = std::max(2000.0f, 10.0f * (float)std::max(prevRawFG_, 5));
-        bool fgSpike = (rawFG > (int)spikeThresh) && (warmupFrames_ == 0);
-        if (!fgSpike)
-            prevRawFG_ = rawFG;  // keep baseline stable during spike frames
+        // SKIP during freeze frames — lr=0 means FG is deterministic, no real spike possible.
+        // Also skip during warmup — avoids infinite reset loop while MOG2 is settling.
+        if (!isFrozen) {
+            float spikeThresh = std::max(2000.0f, 10.0f * (float)std::max(prevRawFG_, 5));
+            bool fgSpike = (rawFG > (int)spikeThresh) && (warmupFrames_ == 0);
+            if (!fgSpike)
+                prevRawFG_ = rawFG;  // keep baseline stable during spike frames
 
-        if (rawFG > 80000 || fgSpike) {
-            if (fgSpike && warmupFrames_ < 5)
-                warmupFrames_ = 5;  // adaptive warmup extension: re-learn for 5 frames
-            lastRawContours_ = 0;
-            // prevFgMask_ NOT updated — LK keeps the pre-spike clean feature mask
-            return d;
+            if (rawFG > 80000 || fgSpike) {
+                if (fgSpike && warmupFrames_ < 5)
+                    warmupFrames_ = 5;
+                lastRawContours_ = 0;
+                return d;
+            }
         }
 
         // Edge mask + warp fgMask back to current frame coordinates

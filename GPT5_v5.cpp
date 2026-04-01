@@ -705,6 +705,13 @@ public:
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
+    // Call after every servo step: temporarily boost MOG2 lr so it quickly
+    // learns the new viewpoint instead of treating the whole shifted background as FG.
+    void notifyServoMove() {
+        if (warmupFrames_ < 3)
+            warmupFrames_ = 3;  // 3 frames at lr=0.5 after each camera pan
+    }
+
     void reinitBGS() {
         mog2_ = cv::createBackgroundSubtractorMOG2(500, 30.0, false);
         mog2_->setNMixtures(5);
@@ -1788,8 +1795,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: even with spatial filter, >5 objects means noise burst
-        if ((int)d.all_boxes.size() > 5) {
+        // Noise gate: >3 objects = noise burst (was 5, tightened to reduce false locks)
+        if ((int)d.all_boxes.size() > 3) {
             d.valid = false;
             d.all_boxes.clear();
         }
@@ -1981,10 +1988,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // When error is growing (object escaping), D increases correction
         bool servoAllowed = false;
         if (currentTrackingEnabled && !scanActive && d.valid && servoSettleCounter <= 0) {
-            // Allow servo correction after 1st valid detection regardless of dist/confidence.
-            // Previous gate (consecutiveValid>=3 && conf>=0.5) caused ~200ms lag after
-            // every miss because confidence resets to 0 and needs frames to rebuild.
-            servoAllowed = (consecutiveValid >= 1);
+            // When actively tracking (conf >= 0.5): respond immediately on 1st detection.
+            // When acquiring / after loss (conf < 0.5): require 2 consecutive valid
+            // detections to avoid chasing single noisy MOG2 contours (conf=0, miss=40+).
+            if (state.confidence >= 0.5 || servoClose) {
+                servoAllowed = (consecutiveValid >= 1);
+            } else {
+                servoAllowed = (consecutiveValid >= 2);
+            }
         }
         if (servoAllowed) {
             double ex = d.x - cx;
@@ -2027,6 +2038,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             servoSettleCounter = 0;  // correct every frame
+            // Notify MOG2: camera has panned → boost lr for 3 frames so background
+            // is re-learned quickly instead of triggering a massive FG explosion.
+            detector.notifyServoMove();
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

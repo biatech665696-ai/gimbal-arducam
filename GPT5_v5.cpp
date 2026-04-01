@@ -1889,15 +1889,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // === SCAN MODE LOGIC ===
         bool scanActive = false;
+        static int scanExitCount = 0;  // consecutive valid detections needed to leave scan
         if (scanEnabled.load() && currentTrackingEnabled) {
             if (d.valid) {
-                noDetectionSince = std::chrono::steady_clock::now();
-                if (wasScanning) {
-                    std::cout << "[SCAN] Object detected! Switching to tracking." << std::endl;
-                    wasScanning = false;
-                    scanDwelling = false;
+                scanExitCount++;
+                if (scanExitCount >= 3) {
+                    // Require 3 consecutive valid detections before exiting scan.
+                    // A single noisy MOG2 contour is NOT enough to interrupt sweep.
+                    noDetectionSince = std::chrono::steady_clock::now();
+                    if (wasScanning) {
+                        std::cout << "[SCAN] Object confirmed (3 consecutive). Switching to tracking." << std::endl;
+                        wasScanning = false;
+                        scanDwelling = false;
+                        scanExitCount = 0;
+                    }
                 }
             } else {
+                scanExitCount = 0;  // reset on any miss
                 auto now = std::chrono::steady_clock::now();
                 double noDetSec = std::chrono::duration<double>(now - noDetectionSince).count();
 
@@ -1973,11 +1981,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // When error is growing (object escaping), D increases correction
         bool servoAllowed = false;
         if (currentTrackingEnabled && !scanActive && d.valid && servoSettleCounter <= 0) {
-            if (servoClose) {
-                servoAllowed = (consecutiveValid >= 1);
-            } else {
-                servoAllowed = (consecutiveValid >= 3 && state.confidence >= 0.5);
-            }
+            // Allow servo correction after 1st valid detection regardless of dist/confidence.
+            // Previous gate (consecutiveValid>=3 && conf>=0.5) caused ~200ms lag after
+            // every miss because confidence resets to 0 and needs frames to rebuild.
+            servoAllowed = (consecutiveValid >= 1);
         }
         if (servoAllowed) {
             double ex = d.x - cx;

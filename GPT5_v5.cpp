@@ -708,8 +708,8 @@ public:
     // Call after every servo step: temporarily boost MOG2 lr so it quickly
     // learns the new viewpoint instead of treating the whole shifted background as FG.
     void notifyServoMove() {
-        if (warmupFrames_ < 3)
-            warmupFrames_ = 3;  // 3 frames at lr=0.5 after each camera pan
+        if (warmupFrames_ < 5)
+            warmupFrames_ = 5;  // 5 frames at lr=0.5 after each camera pan
     }
 
     void reinitBGS() {
@@ -863,10 +863,20 @@ public:
 
         int rawFG = cv::countNonZero(fgMask);
         lastFGPixels_ = rawFG;
-        prevRawFG_ = rawFG;
 
-        if (rawFG > 80000) {
+        // Spike detection: sudden FG explosion vs quiet baseline (camera pan / LK failure).
+        // Only fires during non-warmup frames (warmupFrames_==0) to avoid an infinite
+        // reset loop while MOG2 is still settling.
+        float spikeThresh = std::max(2000.0f, 10.0f * (float)std::max(prevRawFG_, 5));
+        bool fgSpike = (rawFG > (int)spikeThresh) && (warmupFrames_ == 0);
+        if (!fgSpike)
+            prevRawFG_ = rawFG;  // keep baseline stable during spike frames
+
+        if (rawFG > 80000 || fgSpike) {
+            if (fgSpike && warmupFrames_ < 5)
+                warmupFrames_ = 5;  // adaptive warmup extension: re-learn for 5 frames
             lastRawContours_ = 0;
+            // prevFgMask_ NOT updated — LK keeps the pre-spike clean feature mask
             return d;
         }
 

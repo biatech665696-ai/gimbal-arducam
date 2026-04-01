@@ -1781,11 +1781,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static int framesWithoutDetection = 0;  // for return-to-center
         static double prevErrX = 0, prevErrY = 0;  // for PD controller D-term
         static double filtErrX = 0, filtErrY = 0;  // EMA-filtered error
+        // Rolling 3-frame detection average: smooths centroid jitter (±40px)
+        // without adding lag — window is short enough to follow moving objects.
+        static std::deque<cv::Point2d> detAvgBuf;
         if (resetSpatialGating) {
             lastKnownX = -1; lastKnownY = -1;
             servoSettleCounter = 0;
             consecutiveValid = 0;
             framesWithoutDetection = 0;
+            detAvgBuf.clear();
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
@@ -1961,12 +1965,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (d.valid) {
             consecutiveValid++;
             framesWithoutDetection = 0;
+            detAvgBuf.push_back({d.x, d.y});
+            if ((int)detAvgBuf.size() > 3) detAvgBuf.pop_front();
         } else {
             consecutiveValid = 0;
             framesWithoutDetection++;
             if (framesWithoutDetection > 5) {
                 prevErrX = 0; prevErrY = 0;  // reset D-term only after extended loss
                 filtErrX = 0; filtErrY = 0;  // reset EMA filter too
+                detAvgBuf.clear();  // stale history — discard
             }
         }
 
@@ -1998,8 +2005,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
         }
         if (servoAllowed) {
-            double ex = d.x - cx;
-            double ey = d.y - cy;
+            // Use averaged detection position to reduce centroid jitter before servo
+            double avgX = d.x, avgY = d.y;
+            if (!detAvgBuf.empty()) {
+                avgX = 0; avgY = 0;
+                for (auto& p : detAvgBuf) { avgX += p.x; avgY += p.y; }
+                avgX /= detAvgBuf.size();
+                avgY /= detAvgBuf.size();
+            }
+            double ex = avgX - cx;
+            double ey = avgY - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
             // EMA filter on error: smooth out measurement noise + break feedback oscillation

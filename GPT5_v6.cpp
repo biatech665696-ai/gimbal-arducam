@@ -1840,6 +1840,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::Point2f searchPt(-1, -1);
         // Track previous frame's fg for learning rate decision
         static int fgPrevFrame = 0;
+        static int postStormFreeze = 0;  // frames of lr=0 after storm to prevent absorption
         // Widen spatial gate after servo correction.
         // During active tracking, keep wider gate permanently — PX_PER_DEG compensation
         // accumulates error over multiple steps.
@@ -1858,12 +1859,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // which resolves in <10 frames, so object is safe.
         // When fg is high AND we're not detecting the object, pump lr to clear
         // the FG storm fast. When detecting, use moderate lr to avoid absorption.
+        // Post-storm recovery: when fg drops from storm (>3000) to clean (<1500),
+        // freeze MOG2 for 3 frames (lr=0). Object was partially absorbed during
+        // storm (lr=0.05 x 5-10 frames). Freezing prevents further absorption
+        // and gives object a chance to be detected before model erases it.
+        if (fgPrevFrame > 3000 && postStormFreeze == 0)
+            postStormFreeze = 0;  // will be set when fg drops
+        if (fgPrevFrame <= 1500 && postStormFreeze < 0)
+            postStormFreeze = 5;  // arm: fg dropped below threshold
+        if (fgPrevFrame > 3000)
+            postStormFreeze = -1; // in storm: armed but not counting
+
         double trackingLR;
-        if (fgPrevFrame > 5000) trackingLR = 0.1;          // full storm: aggressive clear (gated anyway)
-        else if (fgPrevFrame > 2000) trackingLR = 0.05;    // storm tail: fast clear
-        else if (fgPrevFrame > 1000) trackingLR = 0.015;   // elevated: moderate
-        else if (framesSinceServo < 15) trackingLR = 0.008; // post-servo settling
-        else trackingLR = 0.0;                              // normal
+        if (postStormFreeze > 0) {
+            trackingLR = 0.0;     // post-storm freeze: don't absorb object further
+            postStormFreeze--;
+        } else if (fgPrevFrame > 3000) trackingLR = 0.05;   // storm: was 0.1 which absorbed object in 5 frames
+        else if (fgPrevFrame > 1000) trackingLR = 0.015;    // elevated: moderate
+        else if (framesSinceServo < 15) trackingLR = 0.008;  // post-servo settling
+        else trackingLR = 0.0;                               // normal
         Detection d = detector.detect(resized, 0, 0, trackingLR, searchPt, searchRad);
 
         // === PER-FRAME DIAGNOSTIC LOG ===
@@ -1881,12 +1895,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             rejectReason = "FG_GATE";
         }
 
-        // Confidence gate: when fg is elevated (1500-3000), many noise blobs
-        // pass contour filter. If >3 objects found, very likely noise.
-        // Threshold at fg>1500 (not 1000): fg 1000-1500 is transitional and
-        // may contain real detections. Consecutive-detection trust prevents
-        // spatial gate poisoning from single false detections.
-        if (!rejectReason && fgPx > 1500 && (int)d.all_boxes.size() > 3) {
+        // Confidence gate: when fg is elevated, many noise blobs pass contour filter.
+        // Tiered: at fg 1500-2000 allow up to 6 objects (transitional zone, object
+        // often detected with 4-5 nearby noise blobs). Above 2000: strict >3 filter.
+        if (!rejectReason && fgPx > 2000 && (int)d.all_boxes.size() > 3) {
+            d.valid = false;
+            d.all_boxes.clear();
+            rejectReason = "NOISE_HI_FG";
+        }
+        if (!rejectReason && fgPx > 1500 && (int)d.all_boxes.size() > 6) {
             d.valid = false;
             d.all_boxes.clear();
             rejectReason = "NOISE_HI_FG";

@@ -1197,7 +1197,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.25;  // smoothing factor per 10ms step
+    const double ALPHA = 0.6;  // smoothing factor per 10ms step (reach ~97% in 50ms)
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1465,8 +1465,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 }
             }
 
-            // Clamp max error: >200px from center = likely false detection
-            const double MAX_ERR = 200.0;
+            // Clamp max error: >600px from center = likely false detection
+            const double MAX_ERR = 600.0;
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
@@ -1491,8 +1491,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew rate limiter: max degrees per frame (~20fps → 60°/s)
-            const double MAX_STEP_DEG = 3.0;
+            // Slew rate limiter: max degrees per frame (~20fps → 120°/s)
+            const double MAX_STEP_DEG = 6.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

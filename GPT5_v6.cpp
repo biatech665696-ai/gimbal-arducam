@@ -1879,18 +1879,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // Confidence gate: when fg is elevated, many noise blobs pass contour filter.
-        // Tiered: at fg 1500-2000 allow up to 6 objects (transitional zone, object
-        // often detected with 4-5 nearby noise blobs). Above 2000: strict >3 filter.
-        if (!rejectReason && fgPx > 2000 && (int)d.all_boxes.size() > 3) {
-            d.valid = false;
-            d.all_boxes.clear();
-            rejectReason = "NOISE_HI_FG";
+        // Spatial rescue: if the best detection is close to lastKnown position,
+        // trust it even during noise — spatial coherence overrides blob count.
+        bool noiseTriggered = false;
+        if (!rejectReason && fgPx > 2000 && (int)d.all_boxes.size() > 3) noiseTriggered = true;
+        if (!rejectReason && !noiseTriggered && fgPx > 1500 && (int)d.all_boxes.size() > 6) noiseTriggered = true;
+
+        if (noiseTriggered) {
+            bool rescued = false;
+            if (d.valid && searchPt.x >= 0) {
+                float dx = d.x - searchPt.x;
+                float dy = d.y - searchPt.y;
+                float dist = std::sqrt(dx * dx + dy * dy);
+                if (dist < 30.0f) rescued = true;  // 30px at 480×270
+            }
+            if (!rescued) {
+                d.valid = false;
+                d.all_boxes.clear();
+                rejectReason = "NOISE_HI_FG";
+            }
         }
-        if (!rejectReason && fgPx > 1500 && (int)d.all_boxes.size() > 6) {
-            d.valid = false;
-            d.all_boxes.clear();
-            rejectReason = "NOISE_HI_FG";
-        }
+
+        // Track if detection was rescued from NOISE gate
+        bool wasRescued = (noiseTriggered && d.valid);
 
         if (!rejectReason && !d.valid) {
             rejectReason = "NO_CONTOUR";
@@ -1911,6 +1922,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                   << " fServo=" << framesSinceServo
                   << " lr=" << std::fixed << std::setprecision(4) << trackingLR;
         if (rejectReason) std::cout << " REJ=" << rejectReason;
+        if (wasRescued) std::cout << " RESCUED";
         if (d.valid) std::cout << " pos=(" << (int)(d.x*scX) << "," << (int)(d.y*scY) << ")";
         std::cout << std::endl;
 

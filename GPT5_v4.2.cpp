@@ -729,7 +729,7 @@ public:
         float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
 
         // Reset when model space drifted too far (edge artifacts dominate)
-        if (cumShift > 150.0f) {
+        if (cumShift > 80.0f) {
             reinitBGS();
             prevGray_ = gray.clone();
         }
@@ -792,6 +792,9 @@ public:
         lastRawContours_ = (int)contours.size();
 
         // === ФИЛЬТРАЦИЯ КОНТУРОВ ===
+        // Spatial proximity gate: when we know where the object is, ignore far-away noise
+        bool hasSpatialRef = (lastValidCenter_.x >= 0);
+        const float SEARCH_RADIUS = 60.0f; // pixels at 0.25x scale
         std::vector<std::pair<double, int>> validObjects;
 
         for (size_t i = 0; i < contours.size(); i++) {
@@ -805,6 +808,15 @@ public:
             bool atEdge = (bbox.x <= EDGE_MARGIN || bbox.y <= EDGE_MARGIN ||
                           bbox.x + bbox.width >= roi.cols - EDGE_MARGIN ||
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
+
+            // Spatial gate: skip contours far from last known position
+            if (hasSpatialRef) {
+                float cx_ = bbox.x + bbox.width * 0.5f;
+                float cy_ = bbox.y + bbox.height * 0.5f;
+                float dist = std::sqrt((cx_ - lastValidCenter_.x) * (cx_ - lastValidCenter_.x)
+                                     + (cy_ - lastValidCenter_.y) * (cy_ - lastValidCenter_.y));
+                if (dist > SEARCH_RADIUS) continue;
+            }
 
             if (!atEdge &&
                 area >= 3.0 && area <= 1500.0 &&
@@ -1293,8 +1305,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         int objCount = (int)d.all_boxes.size();
         const char* rejectReason = nullptr;
 
-        // Noise gate: >5 объектов после фильтрации = шум MOG2
-        if (objCount > 5) {
+        // Noise gate: >15 объектов после фильтрации = шум MOG2
+        // (spatial proximity gate in detector already filters distant artifacts)
+        if (objCount > 15) {
             d.valid = false;
             d.all_boxes.clear();
             detector.resetConsecutive();

@@ -709,8 +709,12 @@ public:
     // Call after every servo step: FREEZE MOG2 for 2 frames (lr=0) so the
     // object is not absorbed while LK affine catches up with the camera shift.
     // Gold baseline principle: freeze during camera motion, not boost.
-    void notifyServoMove() {
-        freezeFrames_ = 2;
+    // Freeze only for large servo steps (acquisition mode).
+    // In tracking mode, small ±2.5° steps are within LK affine range — no freeze needed.
+    // Perpetual freeze during tracking prevented MOG2 from learning → stale model.
+    void notifyServoMove(bool largeStep = false) {
+        if (largeStep)
+            freezeFrames_ = 1;
     }
 
     void reinitBGS() {
@@ -838,7 +842,8 @@ public:
         if (cumShift > 300.0f) {
             cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
             modelSpaceValid_ = false;
-            prevGray_ = cv::Mat();  // force LK to restart
+            // Keep prevGray_ so LK works next frame (computes fresh affine).
+            // Clearing it caused 1 frame with no affine → raw frame to MOG2 → FG explosion.
             warmupFrames_ = 5;     // 5 frames at moderate lr
         }
 
@@ -2078,7 +2083,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastPitchDeg = pitchDeg;
             servoSettleCounter = 0;
             framesSinceServo = 0;
-            detector.notifyServoMove();
+            detector.notifyServoMove(absErr > 150.0);  // freeze only acquisition
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

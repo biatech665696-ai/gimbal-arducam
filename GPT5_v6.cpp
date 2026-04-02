@@ -1819,42 +1819,26 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         framesSinceServo++;
         cv::Point2f searchPt(-1, -1);
-        // Widen spatial gate for 3 frames after servo correction:
+        // Widen spatial gate for 5 frames after servo correction:
         // spatial gate compensation is imprecise (PX_PER_DEG mismatch, object motion).
-        float searchRad = (framesSinceServo < 3) ? 100.0f : 40.0f;
+        float searchRad = (framesSinceServo < 5) ? 100.0f : 40.0f;
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: >3 objects = noise burst (was 5, tightened to reduce false locks)
-        if ((int)d.all_boxes.size() > 3) {
+        // Noise gate: >5 objects = noise burst (relaxed: servo shifts cause transient MOG2 contours)
+        if ((int)d.all_boxes.size() > 5) {
             d.valid = false;
             d.all_boxes.clear();
         }
 
-        // === 3. SPARSE MOTION FILTERING (at detection resolution — 4× faster) ===
-        // SKIP for 3 frames after servo correction: servo shifts image,
-        // LK in tiny bbox (3-10px object) can't match features → false reject.
-        cv::Mat grayDet;
-        cv::cvtColor(resized, grayDet, cv::COLOR_BGR2GRAY);
-        if (d.valid && framesSinceServo >= 3
-            && !prevGrayDet.empty()
-            && prevGrayDet.size() == grayDet.size()) {
-            float motionMag = 0;
-            cv::Rect detRect(d.box_x, d.box_y, d.box_w, d.box_h);
-            if (!motionFilter.validate(prevGrayDet, grayDet, detRect, motionMag))
-                d.valid = false;   // static ghost → reject
-        }
-        prevGrayDet = grayDet;
+        // Motion filter REMOVED: at 480×270 detection resolution, objects are 3-10px.
+        // goodFeaturesToTrack in such tiny bboxes fails to find points → false reject in ~80% frames.
+        // MOG2 with motion compensation already filters static background.
 
-        // === 5. SUBPIXEL CENTROID ESTIMATION (at detection resolution) ===
-        if (d.valid) {
-            cv::Point2f refined = SubpixelRefiner::refine(
-                grayDet, cv::Point2f((float)d.x, (float)d.y), 4);
-            d.x = refined.x;
-            d.y = refined.y;
-        }
+        // Subpixel refinement REMOVED: Gaussian moments unreliable on 3-10px objects
+        // at 480×270 resolution. Saves ~2ms per frame.
 
         // Scale back: detection coords (480x270) → full-frame coords
         if (d.valid) {
@@ -2017,15 +2001,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 9+10. SERVO CONTROL — PD controller with damping ===
-        // P-term: proportional to pixel error → drives toward object
-        // D-term: proportional to change in error → dampens oscillation
-        // When error is shrinking (servo converging), D reduces correction
-        // When error is growing (object escaping), D increases correction
+        // === 9+10. SERVO CONTROL — two-mode: acquisition + tracking ===
+        // Acquisition (error > 150px): aggressive proportional, high slew
+        // Tracking  (error <= 150px): PD controller with EMA, moderate slew
         bool servoAllowed = false;
         if (currentTrackingEnabled && !scanActive && d.valid && servoSettleCounter <= 0) {
-            // When actively tracking (conf >= 0.5): respond immediately on 1st detection.
-            // When acquiring / after loss (conf < 0.5): require 2 consecutive valid
-            // detections to avoid chasing single noisy MOG2 contours (conf=0, miss=40+).
             if (state.confidence >= 0.5 || servoClose) {
                 servoAllowed = (consecutiveValid >= 1);
             } else {
@@ -2036,26 +2016,39 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ex = d.x - cx;
             double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
+            double absErr = std::sqrt(ex * ex + ey * ey);
 
-            // EMA filter on error: smooth out measurement noise + break feedback oscillation
-            // alpha=0.7 → ~30% of previous, tau≈0.8 frames (~27ms lag)
-            const double ALPHA = 0.7;
-            filtErrX = ALPHA * ex + (1.0 - ALPHA) * filtErrX;
-            filtErrY = ALPHA * ey + (1.0 - ALPHA) * filtErrY;
+            double corrYaw, corrPitch;
+            if (absErr > 150.0) {
+                // ACQUISITION MODE: large error → aggressive proportional jump
+                corrYaw   = -ex * 0.7 * DEG_PER_PX;
+                corrPitch = -ey * 0.7 * DEG_PER_PX;
+                corrYaw   = std::clamp(corrYaw,   -6.0, 6.0);
+                corrPitch = std::clamp(corrPitch, -6.0, 6.0);
+                // Reset EMA to current error so tracking mode starts clean
+                filtErrX = ex;
+                filtErrY = ey;
+                prevErrX = filtErrX;
+                prevErrY = filtErrY;
+            } else {
+                // TRACKING MODE: PD controller with EMA smoothing
+                const double ALPHA = 0.7;
+                filtErrX = ALPHA * ex + (1.0 - ALPHA) * filtErrX;
+                filtErrY = ALPHA * ey + (1.0 - ALPHA) * filtErrY;
 
-            // D-term: derivative of filtered error
-            double dex = filtErrX - prevErrX;
-            double dey = filtErrY - prevErrY;
-            prevErrX = filtErrX;
-            prevErrY = filtErrY;
+                double dex = filtErrX - prevErrX;
+                double dey = filtErrY - prevErrY;
+                prevErrX = filtErrX;
+                prevErrY = filtErrY;
 
-            // PD controller on filtered error: Kp=0.55, Kd=0.15
-            double Kp = 0.55;
-            double Kd = 0.15;
-            double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
-            double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
-            corrYaw   = std::clamp(corrYaw,   -3.5, 3.5);
-            corrPitch = std::clamp(corrPitch, -3.5, 3.5);
+                double Kp = 0.55;
+                double Kd = 0.15;
+                corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
+                corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
+                corrYaw   = std::clamp(corrYaw,   -2.5, 2.5);
+                corrPitch = std::clamp(corrPitch, -2.5, 2.5);
+            }
+
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
@@ -2072,17 +2065,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
-            servoSettleCounter = 0;  // correct every frame
-            framesSinceServo = 0;   // reset counter for motion filter + spatial gate
-            // Freeze MOG2 for 2 frames so LK affine catches up with camera shift
-            // and object is not absorbed into background at high lr.
+            servoSettleCounter = 0;
+            framesSinceServo = 0;
             detector.notifyServoMove();
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
-
-        // No coast servo — servo holds last position when object is lost.
-        // Coast fought with servo corrections: inaccurate Kalman velocity
-        // moved servo away from object, then detection was lost in wrong direction.
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);

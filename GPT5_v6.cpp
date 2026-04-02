@@ -839,12 +839,15 @@ public:
         // raw (unwarped) frame → entire frame becomes FG. Moderate warmup (lr=0.1
         // for 5 frames) relearns background without absorbing small objects
         // (absorption at lr=0.1 takes ~20 frames; we only do 5).
-        if (cumShift > 300.0f) {
+        if (cumShift > 150.0f) {
+            // Reset more often (150 vs 300) but WITHOUT warmup.
+            // Warmup at lr=0.1 absorbed objects and caused 5-frame blind windows.
+            // With tracking lr=0.008, MOG2 adapts to the raw frame naturally.
+            // Smaller threshold means less edge artifact accumulation.
             cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
             modelSpaceValid_ = false;
-            // Keep prevGray_ so LK works next frame (computes fresh affine).
-            // Clearing it caused 1 frame with no affine → raw frame to MOG2 → FG explosion.
-            warmupFrames_ = 5;     // 5 frames at moderate lr
+            // warmupFrames_ NOT set — avoid forced lr=0.1 which absorbs object.
+            // Normal lr (0.003 or tracking 0.008) handles recovery.
         }
 
         double lr;
@@ -859,7 +862,12 @@ public:
             lr = (warmupFrames_ > 10) ? 0.5 : 0.1;
             warmupFrames_--;
         } else {
-            lr = 0.003;
+            // During active tracking (forcedLR > 0), MOG2 must learn faster
+            // to keep up with imperfect affine compensation from servo motion.
+            // lr=0.003 needs 330 frames to adapt — too slow during camera movement.
+            // lr=0.008 adapts in ~125 frames, still safe (object absorption needs ~125 frames
+            // but object is re-detected every ~5 frames, well before it would be absorbed).
+            lr = (forcedLR > 0) ? forcedLR : 0.003;
         }
 
         // Warp current frame to model space (background stationary)
@@ -884,7 +892,7 @@ public:
         // SKIP during freeze frames — lr=0 means FG is deterministic, no real spike possible.
         // Also skip during warmup — avoids infinite reset loop while MOG2 is settling.
         if (!isFrozen) {
-            float spikeThresh = std::max(2000.0f, 10.0f * (float)std::max(prevRawFG_, 5));
+            float spikeThresh = std::max(5000.0f, 10.0f * (float)std::max(prevRawFG_, 5));
             bool fgSpike = (rawFG > (int)spikeThresh) && (warmupFrames_ == 0);
             if (!fgSpike)
                 prevRawFG_ = rawFG;  // keep baseline stable during spike frames
@@ -1824,19 +1832,26 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         framesSinceServo++;
         cv::Point2f searchPt(-1, -1);
-        // Widen spatial gate for 5 frames after servo correction:
-        // spatial gate compensation is imprecise (PX_PER_DEG mismatch, object motion).
-        float searchRad = (framesSinceServo < 5) ? 100.0f : 40.0f;
+        // Widen spatial gate after servo correction.
+        // During active tracking, keep wider gate permanently — PX_PER_DEG compensation
+        // accumulates error over multiple steps.
+        float searchRad;
+        if (framesSinceServo < 10) searchRad = 150.0f;   // active tracking: wide
+        else if (framesSinceServo < 30) searchRad = 80.0f; // settling
+        else searchRad = 40.0f;                            // stationary
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
-        Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
+        // During active tracking, boost MOG2 learning rate for faster adaptation
+        double trackingLR = (framesSinceServo < 15) ? 0.008 : 0.0;
+        Detection d = detector.detect(resized, 0, 0, trackingLR, searchPt, searchRad);
 
         // FG-based gating: suppress false detections from massive camera shift
         int fgPx = detector.lastFGPixels();
-        if (fgPx > 3000) {
+        if (fgPx > 5000) {
             // Absolute FG gate: massive foreground = camera pan, not object.
-            // Real objects are 50-200px; 3000+ means MOG2 still settling.
+            // Real objects are 50-200px; 5000+ means MOG2 still settling.
+            // Was 3000, but during tracking residual affine errors produce 500-3000px FG normally.
             d.valid = false;
             d.all_boxes.clear();
         }

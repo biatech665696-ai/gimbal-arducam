@@ -1827,8 +1827,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // Noise gate: >5 objects = noise burst (relaxed: servo shifts cause transient MOG2 contours)
-        if ((int)d.all_boxes.size() > 5) {
+        // FG-based gating: suppress false detections from camera shift artifacts
+        int fgPx = detector.lastFGPixels();
+        if (framesSinceServo < 5 && fgPx > 200) {
+            // After servo move, MOG2 background is destabilized.
+            // Real object = 50-150px; anything above 200 is shift artifact.
+            d.valid = false;
+            d.all_boxes.clear();
+        } else if (fgPx > 5000) {
+            // Absolute FG gate: massive foreground = camera pan, not object
+            d.valid = false;
+            d.all_boxes.clear();
+        }
+
+        // Noise gate: >3 objects = noise burst
+        if ((int)d.all_boxes.size() > 3) {
             d.valid = false;
             d.all_boxes.clear();
         }

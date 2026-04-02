@@ -857,9 +857,10 @@ public:
             freezeFrames_--;
             isFrozen = true;
         } else if (warmupFrames_ > 0) {
-            // lr=0.1 for cumShift resets (gentler than 0.5 — less object absorption).
-            // lr=0.5 only used for initial startup (warmupFrames_=50 in constructor).
-            lr = (warmupFrames_ > 10) ? 0.5 : 0.1;
+            // Initial startup: lr=0.5 for first 10 frames, then 0.05.
+            // Post-runtime: warmup only from initial startup (50 frames).
+            // All other resets use external forcedLR instead of warmup.
+            lr = (warmupFrames_ > 40) ? 0.5 : 0.03;
             warmupFrames_--;
         } else {
             // During active tracking (forcedLR > 0), MOG2 must learn faster
@@ -898,9 +899,14 @@ public:
                 prevRawFG_ = rawFG;  // keep baseline stable during spike frames
 
             if (rawFG > 80000 || fgSpike) {
-                if (fgSpike && warmupFrames_ < 5)
-                    warmupFrames_ = 5;
+                // Spike = LK failure or sudden camera shift. Set short warmup
+                // to re-learn background. Use warmupFrames_=3 at lr=0.05
+                // (from warmup handler above) to quickly reset without absorbing object.
+                if (fgSpike && warmupFrames_ < 3)
+                    warmupFrames_ = 3;
                 lastRawContours_ = 0;
+                std::cout << "  [SPIKE] rawFG=" << rawFG << " thresh=" << (int)spikeThresh
+                          << std::endl;
                 return d;
             }
         }
@@ -1832,6 +1838,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         framesSinceServo++;
         cv::Point2f searchPt(-1, -1);
+        // Track previous frame's fg for learning rate decision
+        static int fgPrevFrame = 0;
         // Widen spatial gate after servo correction.
         // During active tracking, keep wider gate permanently — PX_PER_DEG compensation
         // accumulates error over multiple steps.
@@ -1842,25 +1850,69 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
-        // During active tracking, boost MOG2 learning rate for faster adaptation
-        double trackingLR = (framesSinceServo < 15) ? 0.008 : 0.0;
+        // During active tracking OR when fg is elevated, boost MOG2 learning rate.
+        // KEY INSIGHT: when fg is high (background model broken), DON'T try to detect —
+        // pump lr high to clear fg fast, then resume detection from clean state.
+        // lr=0.05 clears 20k fg in ~10 frames vs lr=0.008 needing 40+ frames.
+        // Object absorption at lr=0.05 needs ~20 frames — we only do it while fg>2000,
+        // which resolves in <10 frames, so object is safe.
+        // When fg is high AND we're not detecting the object, pump lr to clear
+        // the FG storm fast. When detecting, use moderate lr to avoid absorption.
+        double trackingLR;
+        if (fgPrevFrame > 5000) trackingLR = 0.1;          // full storm: aggressive clear (gated anyway)
+        else if (fgPrevFrame > 2000) trackingLR = 0.05;    // storm tail: fast clear
+        else if (fgPrevFrame > 1000) trackingLR = 0.015;   // elevated: moderate
+        else if (framesSinceServo < 15) trackingLR = 0.008; // post-servo settling
+        else trackingLR = 0.0;                              // normal
         Detection d = detector.detect(resized, 0, 0, trackingLR, searchPt, searchRad);
 
-        // FG-based gating: suppress false detections from massive camera shift
+        // === PER-FRAME DIAGNOSTIC LOG ===
         int fgPx = detector.lastFGPixels();
-        if (fgPx > 5000) {
-            // Absolute FG gate: massive foreground = camera pan, not object.
-            // Real objects are 50-200px; 5000+ means MOG2 still settling.
-            // Was 3000, but during tracking residual affine errors produce 500-3000px FG normally.
+        int rawContours = detector.lastRawContours();
+        int objBeforeGate = (int)d.all_boxes.size();  // save before gates clear it
+        const char* rejectReason = nullptr;
+
+        // FG-based gating: when fg is high, ALL contours are background noise.
+        // Real object is indistinguishable from hundreds of residual FG blobs.
+        // Gate at 3000: real objects produce fg 50-500; anything above = broken model.
+        if (fgPx > 3000) {
             d.valid = false;
             d.all_boxes.clear();
+            rejectReason = "FG_GATE";
         }
 
-        // Noise gate: >3 objects = noise burst
-        if ((int)d.all_boxes.size() > 3) {
+        // Confidence gate: when fg is elevated (1500-3000), many noise blobs
+        // pass contour filter. If >3 objects found, very likely noise.
+        // Threshold at fg>1500 (not 1000): fg 1000-1500 is transitional and
+        // may contain real detections. Consecutive-detection trust prevents
+        // spatial gate poisoning from single false detections.
+        if (!rejectReason && fgPx > 1500 && (int)d.all_boxes.size() > 3) {
             d.valid = false;
             d.all_boxes.clear();
+            rejectReason = "NOISE_HI_FG";
         }
+
+        if (!rejectReason && !d.valid) {
+            rejectReason = "NO_CONTOUR";
+        }
+
+        // Update fgPrevFrame for next frame's lr decision
+        fgPrevFrame = fgPx;
+
+        // Per-frame log: print every frame for diagnosis
+        static int diagFrame = 0;
+        diagFrame++;
+        std::cout << "[F" << diagFrame << "] "
+                  << (d.valid ? "DET" : "---")
+                  << " fg=" << fgPx
+                  << " cnt=" << rawContours
+                  << " obj=" << objBeforeGate
+                  << " sRad=" << (int)searchRad
+                  << " fServo=" << framesSinceServo
+                  << " lr=" << std::fixed << std::setprecision(4) << trackingLR;
+        if (rejectReason) std::cout << " REJ=" << rejectReason;
+        if (d.valid) std::cout << " pos=(" << (int)(d.x*scX) << "," << (int)(d.y*scY) << ")";
+        std::cout << std::endl;
 
         // Motion filter REMOVED: at 480×270 detection resolution, objects are 3-10px.
         // goodFeaturesToTrack in such tiny bboxes fails to find points → false reject in ~80% frames.
@@ -2018,9 +2070,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
         }
 
-        // Update spatial gate: follow ONLY actual detections, never Kalman predictions.
-        // Kalman prediction fought with servo compensation — spatial gate drifted away.
-        if (d.valid) {
+        // Update spatial gate: require 2+ consecutive detections for trust.
+        // Single detections after fg storms are often false (noise blob closest
+        // to spatial center). Real objects produce consistent positions across
+        // frames; noise is random. First DET after miss is tentative — only
+        // confirm and update gate on second consecutive DET.
+        // Exception: lastKnownX<0 means no position — trust first detection.
+        if (d.valid && (consecutiveValid >= 2 || lastKnownX < 0)) {
             lastKnownX = d.x;
             lastKnownY = d.y;
         } else if (framesWithoutDetection > 30) {

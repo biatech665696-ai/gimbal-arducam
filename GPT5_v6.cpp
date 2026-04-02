@@ -1827,15 +1827,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
 
-        // FG-based gating: suppress false detections from camera shift artifacts
+        // FG-based gating: suppress false detections from massive camera shift
         int fgPx = detector.lastFGPixels();
-        if (framesSinceServo < 5 && fgPx > 200) {
-            // After servo move, MOG2 background is destabilized.
-            // Real object = 50-150px; anything above 200 is shift artifact.
-            d.valid = false;
-            d.all_boxes.clear();
-        } else if (fgPx > 5000) {
-            // Absolute FG gate: massive foreground = camera pan, not object
+        if (fgPx > 3000) {
+            // Absolute FG gate: massive foreground = camera pan, not object.
+            // Real objects are 50-200px; 3000+ means MOG2 still settling.
             d.valid = false;
             d.all_boxes.clear();
         }
@@ -2033,11 +2029,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double corrYaw, corrPitch;
             if (absErr > 150.0) {
-                // ACQUISITION MODE: large error → aggressive proportional jump
+                // ACQUISITION MODE: proportional jump, limited to 3° max.
+                // Larger steps destroy MOG2 background model → detection lost 20+ frames.
+                // 3° = ~76px shift, within affine compensation range of MOG2.
                 corrYaw   = -ex * 0.7 * DEG_PER_PX;
                 corrPitch = -ey * 0.7 * DEG_PER_PX;
-                corrYaw   = std::clamp(corrYaw,   -6.0, 6.0);
-                corrPitch = std::clamp(corrPitch, -6.0, 6.0);
+                corrYaw   = std::clamp(corrYaw,   -3.0, 3.0);
+                corrPitch = std::clamp(corrPitch, -3.0, 3.0);
                 // Reset EMA to current error so tracking mode starts clean
                 filtErrX = ex;
                 filtErrY = ey;

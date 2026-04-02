@@ -462,7 +462,7 @@ constexpr bool kVerboseTrackingLogs = false;
 constexpr bool kVerboseFrameLoopLogs = false;
 
 // Predictive control parameters (integrated from ChatGPT5 algorithm)
-constexpr double SYSTEM_DELAY = 0.05;   // Реальная задержка: ~50ms при 20fps (1 кадр capture + 1 кадр processing)
+constexpr double SYSTEM_DELAY = 0.08;   // Реальная задержка: ~80ms (exposure 20 + pipeline 15 + detect 10 + EMA ~18 + servo 15)
 // Camera parameters (Arducam 64MP @ 1920x1080)
 const double CX = 960.0;   // Optical center X (half of 1920)
 const double CY = 540.0;   // Optical center Y (half of 1080)
@@ -830,15 +830,16 @@ public:
         float cumTy = modelSpaceValid_ ? (float)cumulativeAffine_.at<double>(1, 2) : 0.0f;
         float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
 
-        // Reset when model space drifted too far (edge artifacts dominate)
-        // Soft reset: keep MOG2 model, reset affine only.
-        // NO warmup — LK restarts from scratch; MOG2 stays at lr=0.003
-        // so the object is not absorbed. Edge mask handles border artifacts.
-        if (cumShift > 100.0f) {
+        // Reset when model space drifted too far (edge artifacts dominate).
+        // MOG2 model was trained in model space, so after invalidation it sees
+        // raw (unwarped) frame → entire frame becomes FG. Moderate warmup (lr=0.1
+        // for 5 frames) relearns background without absorbing small objects
+        // (absorption at lr=0.1 takes ~20 frames; we only do 5).
+        if (cumShift > 300.0f) {
             cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
             modelSpaceValid_ = false;
             prevGray_ = cv::Mat();  // force LK to restart
-            // warmupFrames_ intentionally NOT set — prevents MOG2 blinding
+            warmupFrames_ = 5;     // 5 frames at moderate lr
         }
 
         double lr;
@@ -848,7 +849,9 @@ public:
             freezeFrames_--;
             isFrozen = true;
         } else if (warmupFrames_ > 0) {
-            lr = 0.5;
+            // lr=0.1 for cumShift resets (gentler than 0.5 — less object absorption).
+            // lr=0.5 only used for initial startup (warmupFrames_=50 in constructor).
+            lr = (warmupFrames_ > 10) ? 0.5 : 0.1;
             warmupFrames_--;
         } else {
             lr = 0.003;
@@ -1805,19 +1808,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static int framesWithoutDetection = 0;  // for return-to-center
         static double prevErrX = 0, prevErrY = 0;  // for PD controller D-term
         static double filtErrX = 0, filtErrY = 0;  // EMA-filtered error
-        // Rolling 3-frame detection average: smooths centroid jitter (±40px)
-        // without adding lag — window is short enough to follow moving objects.
-        static std::deque<cv::Point2d> detAvgBuf;
+        static int framesSinceServo = 999;  // frames since last servo correction
         if (resetSpatialGating) {
             lastKnownX = -1; lastKnownY = -1;
             servoSettleCounter = 0;
             consecutiveValid = 0;
             framesWithoutDetection = 0;
-            detAvgBuf.clear();
+            framesSinceServo = 999;
             resetSpatialGating = false;
         }
+        framesSinceServo++;
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
+        // Widen spatial gate for 3 frames after servo correction:
+        // spatial gate compensation is imprecise (PX_PER_DEG mismatch, object motion).
+        float searchRad = (framesSinceServo < 3) ? 100.0f : 40.0f;
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
@@ -1830,9 +1834,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === 3. SPARSE MOTION FILTERING (at detection resolution — 4× faster) ===
+        // SKIP for 3 frames after servo correction: servo shifts image,
+        // LK in tiny bbox (3-10px object) can't match features → false reject.
         cv::Mat grayDet;
         cv::cvtColor(resized, grayDet, cv::COLOR_BGR2GRAY);
-        if (d.valid && !prevGrayDet.empty()
+        if (d.valid && framesSinceServo >= 3
+            && !prevGrayDet.empty()
             && prevGrayDet.size() == grayDet.size()) {
             float motionMag = 0;
             cv::Rect detRect(d.box_x, d.box_y, d.box_w, d.box_h);
@@ -1989,15 +1996,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (d.valid) {
             consecutiveValid++;
             framesWithoutDetection = 0;
-            detAvgBuf.push_back({d.x, d.y});
-            if ((int)detAvgBuf.size() > 3) detAvgBuf.pop_front();
         } else {
             consecutiveValid = 0;
             framesWithoutDetection++;
             if (framesWithoutDetection > 5) {
                 prevErrX = 0; prevErrY = 0;  // reset D-term only after extended loss
                 filtErrX = 0; filtErrY = 0;  // reset EMA filter too
-                detAvgBuf.clear();  // stale history — discard
             }
         }
 
@@ -2029,21 +2033,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
         }
         if (servoAllowed) {
-            // Use averaged detection position to reduce centroid jitter before servo
-            double avgX = d.x, avgY = d.y;
-            if (!detAvgBuf.empty()) {
-                avgX = 0; avgY = 0;
-                for (auto& p : detAvgBuf) { avgX += p.x; avgY += p.y; }
-                avgX /= detAvgBuf.size();
-                avgY /= detAvgBuf.size();
-            }
-            double ex = avgX - cx;
-            double ey = avgY - cy;
+            double ex = d.x - cx;
+            double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
             // EMA filter on error: smooth out measurement noise + break feedback oscillation
-            // alpha=0.4 → ~60% of previous, delays response ~1 frame but kills oscillation
-            const double ALPHA = 0.4;
+            // alpha=0.7 → ~30% of previous, tau≈0.8 frames (~27ms lag)
+            const double ALPHA = 0.7;
             filtErrX = ALPHA * ex + (1.0 - ALPHA) * filtErrX;
             filtErrY = ALPHA * ey + (1.0 - ALPHA) * filtErrY;
 
@@ -2053,13 +2049,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevErrX = filtErrX;
             prevErrY = filtErrY;
 
-            // PD controller on filtered error: Kp=0.40, Kd=0.25
-            double Kp = 0.40;
-            double Kd = 0.25;
+            // PD controller on filtered error: Kp=0.55, Kd=0.15
+            double Kp = 0.55;
+            double Kd = 0.15;
             double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
             double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
-            corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
-            corrPitch = std::clamp(corrPitch, -2.0, 2.0);
+            corrYaw   = std::clamp(corrYaw,   -3.5, 3.5);
+            corrPitch = std::clamp(corrPitch, -3.5, 3.5);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
@@ -2077,6 +2073,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             servoSettleCounter = 0;  // correct every frame
+            framesSinceServo = 0;   // reset counter for motion filter + spatial gate
             // Freeze MOG2 for 2 frames so LK affine catches up with camera shift
             // and object is not absorbed into background at high lr.
             detector.notifyServoMove();

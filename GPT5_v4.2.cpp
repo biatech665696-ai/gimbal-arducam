@@ -728,9 +728,13 @@ public:
         float cumTy = modelSpaceValid_ ? (float)cumulativeAffine_.at<double>(1, 2) : 0.0f;
         float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
 
-        // Reset when model space drifted too far (edge artifacts dominate)
-        if (cumShift > 80.0f) {
-            reinitBGS();
+        // Soft reset when model space drifted too far:
+        // Keep MOG2 model (don't destroy background knowledge!)
+        // Just reset affine to identity + short warmup for adaptation
+        if (cumShift > 200.0f) {
+            cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
+            modelSpaceValid_ = false;
+            warmupFrames_ = 5; // brief adaptation, not full relearn
             prevGray_ = gray.clone();
         }
 
@@ -794,7 +798,7 @@ public:
         // === ФИЛЬТРАЦИЯ КОНТУРОВ ===
         // Spatial proximity gate: when we know where the object is, ignore far-away noise
         bool hasSpatialRef = (lastValidCenter_.x >= 0);
-        const float SEARCH_RADIUS = 60.0f; // pixels at 0.25x scale
+        const float SEARCH_RADIUS = 100.0f; // pixels at 0.25x scale
         std::vector<std::pair<double, int>> validObjects;
 
         for (size_t i = 0; i < contours.size(); i++) {
@@ -1491,8 +1495,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew rate limiter: max degrees per frame (~20fps → 120°/s)
-            const double MAX_STEP_DEG = 6.0;
+            // Slew rate limiter: max degrees per frame (~20fps → 80°/s)
+            const double MAX_STEP_DEG = 4.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

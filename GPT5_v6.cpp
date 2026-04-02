@@ -1840,44 +1840,27 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::Point2f searchPt(-1, -1);
         // Track previous frame's fg for learning rate decision
         static int fgPrevFrame = 0;
-        static int postStormFreeze = 0;  // frames of lr=0 after storm to prevent absorption
         // Widen spatial gate after servo correction.
-        // During active tracking, keep wider gate permanently — PX_PER_DEG compensation
-        // accumulates error over multiple steps.
+        // When we're actively losing detection, force wide gate to re-acquire.
         float searchRad;
-        if (framesSinceServo < 10) searchRad = 150.0f;   // active tracking: wide
-        else if (framesSinceServo < 30) searchRad = 80.0f; // settling
-        else searchRad = 40.0f;                            // stationary
+        if (framesWithoutDetection > 5) searchRad = 200.0f;   // lost: full frame search
+        else if (framesSinceServo < 10) searchRad = 150.0f;    // active tracking: wide
+        else if (framesSinceServo < 30) searchRad = 80.0f;     // settling
+        else searchRad = 40.0f;                                 // stationary
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
-        // During active tracking OR when fg is elevated, boost MOG2 learning rate.
-        // KEY INSIGHT: when fg is high (background model broken), DON'T try to detect —
-        // pump lr high to clear fg fast, then resume detection from clean state.
-        // lr=0.05 clears 20k fg in ~10 frames vs lr=0.008 needing 40+ frames.
-        // Object absorption at lr=0.05 needs ~20 frames — we only do it while fg>2000,
-        // which resolves in <10 frames, so object is safe.
-        // When fg is high AND we're not detecting the object, pump lr to clear
-        // the FG storm fast. When detecting, use moderate lr to avoid absorption.
-        // Post-storm recovery: when fg drops from storm (>3000) to clean (<1500),
-        // freeze MOG2 for 3 frames (lr=0). Object was partially absorbed during
-        // storm (lr=0.05 x 5-10 frames). Freezing prevents further absorption
-        // and gives object a chance to be detected before model erases it.
-        if (fgPrevFrame > 3000 && postStormFreeze == 0)
-            postStormFreeze = 0;  // will be set when fg drops
-        if (fgPrevFrame <= 1500 && postStormFreeze < 0)
-            postStormFreeze = 5;  // arm: fg dropped below threshold
-        if (fgPrevFrame > 3000)
-            postStormFreeze = -1; // in storm: armed but not counting
 
+        // MOG2 tracking learning rate.
+        // Storm lr=0.05: clears 20k→3k in ~8 frames. Absorbs object ~34% over 8 frames.
+        // This absorption is the cost of fast storm clearance.
+        // Alternative (lr=0.03): 22% absorption but ~15 frame clearance — net WORSE
+        // because more FG_GATE frames block detection while absorption still happens.
         double trackingLR;
-        if (postStormFreeze > 0) {
-            trackingLR = 0.0;     // post-storm freeze: don't absorb object further
-            postStormFreeze--;
-        } else if (fgPrevFrame > 3000) trackingLR = 0.05;   // storm: was 0.1 which absorbed object in 5 frames
-        else if (fgPrevFrame > 1000) trackingLR = 0.015;    // elevated: moderate
-        else if (framesSinceServo < 15) trackingLR = 0.008;  // post-servo settling
-        else trackingLR = 0.0;                               // normal
+        if (fgPrevFrame > 3000) trackingLR = 0.05;              // storm: fast clear
+        else if (fgPrevFrame > 1000) trackingLR = 0.015;        // elevated: moderate
+        else if (framesSinceServo < 15) trackingLR = 0.008;     // post-servo settling
+        else trackingLR = 0.0;                                   // normal (base lr=0.003)
         Detection d = detector.detect(resized, 0, 0, trackingLR, searchPt, searchRad);
 
         // === PER-FRAME DIAGNOSTIC LOG ===
@@ -2075,6 +2058,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // Track consecutive valid detections for servo stability
+        // Save framesWithoutDetection BEFORE resetting it — needed for position trust.
+        int fwdBeforeUpdate = framesWithoutDetection;
         if (d.valid) {
             consecutiveValid++;
             framesWithoutDetection = 0;
@@ -2087,13 +2072,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
         }
 
-        // Update spatial gate: require 2+ consecutive detections for trust.
-        // Single detections after fg storms are often false (noise blob closest
-        // to spatial center). Real objects produce consistent positions across
-        // frames; noise is random. First DET after miss is tentative — only
-        // confirm and update gate on second consecutive DET.
-        // Exception: lastKnownX<0 means no position — trust first detection.
-        if (d.valid && (consecutiveValid >= 2 || lastKnownX < 0)) {
+        // Update spatial gate position.
+        // Trust first detection after loss (fwdBeforeUpdate > 5): when the object
+        // was invisible for many frames, any detection in wide-search mode is
+        // far more likely to be real than noise (spatial gate is 200px = whole frame).
+        // Without immediate position update, sRad snaps back to 40px centered on
+        // STALE position → next frame misses → 25-frame cycle of 1-frame detections.
+        // During active tracking (fwd <= 5), require 2+ consecutive for trust —
+        // prevents single noise blobs near storms from poisoning the gate.
+        if (d.valid && (consecutiveValid >= 2 || lastKnownX < 0 || fwdBeforeUpdate > 5)) {
             lastKnownX = d.x;
             lastKnownY = d.y;
         } else if (framesWithoutDetection > 30) {

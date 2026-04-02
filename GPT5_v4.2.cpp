@@ -731,7 +731,7 @@ public:
         // Soft reset when model space drifted too far:
         // Keep MOG2 model (don't destroy background knowledge!)
         // Just reset affine to identity + short warmup for adaptation
-        if (cumShift > 200.0f) {
+        if (cumShift > 300.0f) {
             cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
             modelSpaceValid_ = false;
             warmupFrames_ = 5; // brief adaptation, not full relearn
@@ -1309,17 +1309,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         int objCount = (int)d.all_boxes.size();
         const char* rejectReason = nullptr;
 
-        // Noise gate: >15 объектов после фильтрации = шум MOG2
-        // (spatial proximity gate in detector already filters distant artifacts)
-        if (objCount > 15) {
-            d.valid = false;
-            d.all_boxes.clear();
-            detector.resetConsecutive();
-            rejectReason = "NOISE";
-        }
-
-        if (!rejectReason && !d.valid && fgPx > 2000) {
-            rejectReason = "FG_GATE";
+        // Diagnostic labels only — no blocking gates.
+        // Spatial proximity gate inside detect() already filters noise.
+        if (!d.valid && fgPx > 2000) {
+            rejectReason = "FG_HI";
         }
         if (!rejectReason && !d.valid) {
             rejectReason = "NO_CONTOUR";

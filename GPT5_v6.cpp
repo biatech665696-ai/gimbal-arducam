@@ -677,7 +677,7 @@ class MotionDetector
 {
 public:
     MotionDetector()
-        : mog2_(cv::createBackgroundSubtractorMOG2(500, 30.0, false))
+        : mog2_(cv::createBackgroundSubtractorMOG2(300, 16.0, false))
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
@@ -714,7 +714,7 @@ public:
     }
 
     void reinitBGS() {
-        mog2_ = cv::createBackgroundSubtractorMOG2(500, 30.0, false);
+        mog2_ = cv::createBackgroundSubtractorMOG2(300, 16.0, false);
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
         mog2_->setBackgroundRatio(0.9);
@@ -753,7 +753,7 @@ public:
         else
             gray = roi.clone();
 
-        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.2);
+        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0.8);
 
         // === CAMERA MOTION ESTIMATION (sparse LK + affine) ===
         lastGlobalFlow_ = cv::Point2f(0, 0);
@@ -911,7 +911,7 @@ public:
             fgMask = fgCurr;
         }
 
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel2_);
 
         // Store fg mask (current-frame coords) for next frame's LK feature masking
         prevFgMask_ = fgMask.clone();
@@ -953,11 +953,11 @@ public:
             }
 
             if (!atEdge &&
-                area >= 3.0 && area <= 1500.0 &&
-                solidity > 0.2 &&
-                bbox.width >= 2 && bbox.height >= 2 &&
+                area >= 2.0 && area <= 1500.0 &&
+                solidity > 0.15 &&
+                bbox.width >= 1 && bbox.height >= 1 &&
                 bbox.width <= 100 && bbox.height <= 100 &&
-                aspectRatio > 0.12 && aspectRatio < 8.0) {
+                aspectRatio > 0.1 && aspectRatio < 10.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
                 validObjects.push_back(std::make_pair(area, (int)i));

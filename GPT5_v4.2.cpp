@@ -1221,7 +1221,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.6;  // smoothing factor per 10ms step (fast response)
+    const double ALPHA = 0.5;  // smoothing factor per 10ms step (fast response)
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1482,30 +1482,47 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // PD-controller: D-term damps oscillations near target
+            // NON-LINEAR controller with velocity feedforward
+            // 1) Position term: soft near center, strong at edges (quadratic ramp)
+            //    Prevents overshoot near center while catching up at edges
+            // 2) Velocity feedforward: match object speed directly in deg/frame
             static double prevEx = 0.0, prevEy = 0.0;
             static auto prevTime = std::chrono::steady_clock::now();
             auto nowTime = std::chrono::steady_clock::now();
             double dt = std::chrono::duration<double>(nowTime - prevTime).count();
-            if (dt < 0.001) dt = 0.001; // safety clamp
+            if (dt < 0.001) dt = 0.001;
 
-            // Adaptive Kp: softer near center, full strength far away
             double dist = std::sqrt(ex * ex + ey * ey);
-            double Kp = DEG_PER_PX * std::min(1.0, 0.4 + 0.6 * (dist / 200.0));
-            double Kd = 0.004;  // derivative gain (damps approach)
 
+            // Position term: quadratic ramp — gentle near center, aggressive far
+            // At 10px: factor=0.3, at 50px: factor=0.55, at 200px: factor=1.0
+            double posFactor = std::min(1.0, 0.3 + 0.7 * (dist / 200.0) * (dist / 200.0));
+            double Kp = DEG_PER_PX * posFactor;
+
+            // Velocity feedforward: convert px/s velocity directly to deg/frame
+            double ffYaw = 0.0, ffPitch = 0.0;
+            if (hasVelocity) {
+                // vx, vy are in px/s at full resolution
+                // Convert to deg/frame: px/s * deg/px * dt_frame
+                double dtFrame = dt;  // time since last control update
+                ffYaw   = vx * DEG_PER_PX * dtFrame * 0.8;  // 80% of predicted velocity
+                ffPitch = vy * DEG_PER_PX * dtFrame * 0.8;
+            }
+
+            // D-term: only for damping oscillation, not for speed
+            double Kd = 0.003;
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
-            double stepYaw   = Kp * ex + Kd * dex;
-            double stepPitch = Kp * ey + Kd * dey;
+            double stepYaw   = Kp * ex + Kd * dex + ffYaw;
+            double stepPitch = Kp * ey + Kd * dey + ffPitch;
 
             prevEx = ex;
             prevEy = ey;
             prevTime = nowTime;
 
             // Slew rate limiter: max degrees per frame (~20fps → 16°/s)
-            const double MAX_STEP_DEG = 3.0;
+            const double MAX_STEP_DEG = 2.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
@@ -1551,7 +1568,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double stepYaw   = Kp * ex;
                 double stepPitch = Kp * ey;
 
-                const double MAX_STEP_DEG = 3.0;
+                const double MAX_STEP_DEG = 2.0;
                 if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
                 if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
                 if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

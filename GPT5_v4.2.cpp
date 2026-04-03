@@ -1516,8 +1516,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
-            double stepYaw   = Kp * ex + Kd * dex;
-            double stepPitch = Kp * ey + Kd * dey;
+            // Feedforward: add object velocity directly to servo command
+            // so servo tracks speed, not just position error
+            double FF = 0.5;
+            double ffYaw   = hasVelocity ? FF * vx * DEG_PER_PX : 0.0;
+            double ffPitch = hasVelocity ? FF * vy * DEG_PER_PX : 0.0;
+
+            double stepYaw   = Kp * ex + Kd * dex + ffYaw;
+            double stepPitch = Kp * ey + Kd * dey + ffPitch;
 
             prevEx = ex;
             prevEy = ey;

@@ -1535,11 +1535,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
-            // Feedforward: velocity + acceleration (compensate for lag on accel/decel)
+            // Feedforward: predict ahead by total system latency
+            // (capture + detect + servo response ≈ 120ms)
             double FF = 1.0;
-            double FA = 0.3;  // acceleration feedforward gain
-            double ffYaw   = hasVelocity ? FF * vx * dt + FA * ax * dt * dt : 0.0;
-            double ffPitch = hasVelocity ? FF * vy * dt + FA * ay * dt * dt : 0.0;
+            double FA = 0.3;
+            double LATENCY = 0.12;  // total pipeline latency in seconds
+            double ffYaw   = hasVelocity ? FF * vx * LATENCY + FA * ax * LATENCY * LATENCY : 0.0;
+            double ffPitch = hasVelocity ? FF * vy * LATENCY + FA * ay * LATENCY * LATENCY : 0.0;
 
             double stepYaw   = Kp * ex + Kd * dex + ffYaw;
             double stepPitch = Kp * ey + Kd * dey + ffPitch;

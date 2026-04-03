@@ -1250,8 +1250,8 @@ void servoThread(std::atomic<bool>& run)
             double targetYaw   = baseYaw;
             double targetPitch = basePitch;
 
-            // Predict only for 0..0.10s after last detection (< 2 frames)
-            if (dt > 0.005 && dt < 0.10 && tUpdate > 0.0) {
+            // Predict for 0..0.15s after last detection (~2.5 frames)
+            if (dt > 0.005 && dt < 0.15 && tUpdate > 0.0) {
                 targetYaw   += servoVelYaw.load()   * dt;
                 targetPitch += servoVelPitch.load()  * dt;
                 targetYaw   = std::clamp(targetYaw,   5.0, 175.0);

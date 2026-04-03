@@ -1221,7 +1221,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.5;  // smoothing factor per 10ms step (fast response)
+    const double ALPHA = 0.8;  // smoothing factor per 10ms step — minimal lag
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1454,11 +1454,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     vx = (x1 - x0) / dt;
                     vy = (y1 - y0) / dt;
                     hasVelocity = true;
-                    const double LEAD_TIME = 0.12; // predict 120ms ahead
+                    const double LEAD_TIME = 0.18; // predict 180ms ahead (60ms capture + 60ms process + 60ms servo)
                     double leadX = vx * LEAD_TIME;
                     double leadY = vy * LEAD_TIME;
-                    // Clamp lead to ±60px: prevent wild jumps from noisy velocity
-                    const double MAX_LEAD = 60.0;
+                    // Clamp lead to ±120px: fast circular motion needs more room
+                    const double MAX_LEAD = 120.0;
                     if (leadX > MAX_LEAD) leadX = MAX_LEAD;
                     if (leadX < -MAX_LEAD) leadX = -MAX_LEAD;
                     if (leadY > MAX_LEAD) leadY = MAX_LEAD;

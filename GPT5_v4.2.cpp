@@ -734,7 +734,7 @@ public:
             lr = 0.08;              // Post-cooldown: absorb residuals faster
             postCooldownLR_--;
         } else {
-            lr = 0.005;             // Stable: slow learning keeps object visible
+            lr = 0.01;              // Stable: slow learning keeps object visible, trail ~5s
         }
 
         // === MOG2 FOREGROUND DETECTION ===
@@ -814,9 +814,9 @@ public:
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
             if (!atEdge &&
-                area >= 3.0 && area <= 1500.0 &&
+                area >= 10.0 && area <= 1500.0 &&
                 solidity > 0.2 &&
-                bbox.width >= 2 && bbox.height >= 2 &&
+                bbox.width >= 3 && bbox.height >= 3 &&
                 bbox.width <= 100 && bbox.height <= 100 &&
                 aspectRatio > 0.12 && aspectRatio < 8.0) {
 
@@ -1273,15 +1273,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::Mat gray;
         cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
 
-        // === DETECTION (каждый кадр, без settle) ===
+        // Detection done at 0.25x scale
         Detection d = detector.detect(gray, 0, 0);
-
-        // Noise gate: >5 объектов после фильтрации = шум MOG2
-        if ((int)d.all_boxes.size() > 5) {
-            d.valid = false;
-            d.all_boxes.clear();
-            detector.resetConsecutive();
-        }
 
         // Scale → full-res
         if (d.valid) {

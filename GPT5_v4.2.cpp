@@ -1522,7 +1522,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevTime = nowTime;
 
             // Slew rate limiter
-            const double MAX_STEP_DEG = 2.5;
+            const double MAX_STEP_DEG = 3.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

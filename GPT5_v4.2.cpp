@@ -1221,7 +1221,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.5;  // smoothing factor per 10ms step (fast response)
+    const double ALPHA = 0.8;  // high alpha = minimal lag (was 0.5 → ~20ms extra delay)
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1472,10 +1472,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // PD controller — reduced Kp to keep in proportional zone
-            // (with Kp=2.5 everything was clamped → bang-bang behavior)
-            // Higher Kd acts as velocity matcher for moving targets
+            // PD controller with filtered D-term for phase lag compensation
             static double prevEx = 0.0, prevEy = 0.0;
+            static double filtDex = 0.0, filtDey = 0.0; // EMA-filtered derivative
             static auto prevTime = std::chrono::steady_clock::now();
             auto nowTime = std::chrono::steady_clock::now();
             double dt = std::chrono::duration<double>(nowTime - prevTime).count();
@@ -1483,24 +1482,27 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double dist = std::sqrt(ex * ex + ey * ey);
 
-            // Moderate P: proportional zone extends to ~187px before clamp
-            double Kp = DEG_PER_PX * 1.0;
+            // P: clips at ~125px — good compromise
+            double Kp = DEG_PER_PX * 1.5;
             if (dist < 15.0) Kp *= (0.3 + 0.7 * dist / 15.0);
 
-            // Strong D-term: velocity matching + overshoot damping
-            double Kd = 0.008;
-            double dex = (ex - prevEx) / dt;
-            double dey = (ey - prevEy) / dt;
+            // Raw derivative + EMA filter (alpha=0.4) to reduce noise
+            double rawDex = (ex - prevEx) / dt;
+            double rawDey = (ey - prevEy) / dt;
+            filtDex = 0.4 * rawDex + 0.6 * filtDex;
+            filtDey = 0.4 * rawDey + 0.6 * filtDey;
 
-            double stepYaw   = Kp * ex + Kd * dex;
-            double stepPitch = Kp * ey + Kd * dey;
+            // D-term: strong velocity matching for phase lag compensation
+            double Kd = 0.010;
+
+            double stepYaw   = Kp * ex + Kd * filtDex;
+            double stepPitch = Kp * ey + Kd * filtDey;
 
             prevEx = ex;
             prevEy = ey;
             prevTime = nowTime;
 
-            // Constant slew limit — proportional zone is wide enough
-            // that this only clips at large errors (>187px)
+            // Slew limit: clips only at ~125px error
             const double MAX_STEP_DEG = 7.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
@@ -1508,7 +1510,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
 
             fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f P=(%.2f,%.2f) D=(%.2f,%.2f) step=(%.2f,%.2f)\n",
-                    ex, ey, dist, Kp*ex, Kp*ey, Kd*dex, Kd*dey, stepYaw, stepPitch);
+                    ex, ey, dist, Kp*ex, Kp*ey, Kd*filtDex, Kd*filtDey, stepYaw, stepPitch);
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

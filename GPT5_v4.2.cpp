@@ -284,7 +284,7 @@ static void* handleHttpClient(void* arg) {
         }
 
         std::vector<uchar> jpg;
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 60};
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
         if (!cv::imencode(".jpg", frame, jpg, params) || jpg.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -705,95 +705,112 @@ public:
             }
         }
 
-        prevGray_ = gray.clone();
-
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === MOTION-COMPENSATED MOG2 ===
-        // Warp current frame into model (previous) space so camera motion
-        // is removed BEFORE background subtraction. This keeps the object
-        // as foreground even while the servo is moving.
-        cv::Mat warped = gray;
-        bool hasWarp = !lastAffine_.empty();
-        if (hasWarp) {
-            // lastAffine_ maps prev→curr; with WARP_INVERSE_MAP OpenCV uses
-            // it as dst→src, i.e. model→current, which warps current into model space.
-            cv::warpAffine(gray, warped, lastAffine_, gray.size(),
-                           cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
-                           cv::BORDER_REFLECT_101);
-        }
-
-        // === ADAPTIVE MOG2 LEARNING RATE ===
-        // With warp compensation, camera motion is already removed.
-        // Only need high LR for auto-exposure spikes.
-        double lr;
-        if (prevRawFG_ > 5000 && flowMag < 1.0f) {
-            lr = 0.3;               // Auto-exposure spike: absorb brightness change
-        } else if (postCooldownLR_ > 0) {
-            lr = 0.08;              // Post-cooldown: absorb residuals faster
-            postCooldownLR_--;
-        } else {
-            lr = 0.01;              // Stable: slow learning keeps object visible, trail ~5s
-        }
-
-        // === MOG2 FOREGROUND DETECTION ===
+        // === DUAL-MODE DETECTION ===
+        // Mode A (stable camera, flow < 2px): MOG2 — best for small/slow objects
+        // Mode B (camera moving, flow >= 2px): Compensated frame differencing —
+        //   warp prev frame into curr coords, absdiff → only independent motion remains
         cv::Mat fgMask;
-        mog2_->apply(warped, fgMask, lr);
 
-        // Remove shadows (MOG2 marks as 127 when detectShadows=true)
-        cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
-
-        // Zero warp-artifact edges in model space BEFORE counting FG pixels.
-        // Without this, border reflections inflate rawFG → trigger FG gate → no detection.
-        if (hasWarp) {
-            const int E = std::max(4, (int)std::ceil(flowMag) + 2);
-            if (E < fgMask.rows / 2 && E < fgMask.cols / 2) {
-                fgMask.rowRange(0, E).setTo(0);
-                fgMask.rowRange(fgMask.rows - E, fgMask.rows).setTo(0);
-                fgMask.colRange(0, E).setTo(0);
-                fgMask.colRange(fgMask.cols - E, fgMask.cols).setTo(0);
-            }
-        }
-
-        int rawFG = cv::countNonZero(fgMask);
-        lastFGPixels_ = rawFG;
-        prevRawFG_ = rawFG;
-
-        // === FG PIXEL GATE ===
-        if (rawFG > 4000) {
-            lastRawContours_ = 0;
-            consecutiveDetections_ = 0;
-            cooldownFrames_ = 2;
-            return d;
-        }
-
-        // === COOLDOWN (adaptive: exit early when FG settles) ===
-        if (cooldownFrames_ > 0) {
-            if (rawFG < 300) {
-                cooldownFrames_ = 0;  // FG settled, end cooldown early
-                postCooldownLR_ = 3;
+        if (flowMag < 2.0f) {
+            // === MODE A: MOG2 ===
+            double lr;
+            if (prevRawFG_ > 5000 && flowMag < 1.0f) {
+                lr = 0.3;
+            } else if (framesSinceMotion_ < 3) {
+                lr = 0.2;
+                framesSinceMotion_++;
             } else {
-                cooldownFrames_--;
+                lr = 0.008;
+                if (postCooldownLR_ > 0) {
+                    lr = 0.08;
+                    postCooldownLR_--;
+                }
+            }
+
+            mog2_->apply(gray, fgMask, lr);
+            cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
+
+            int rawFG = cv::countNonZero(fgMask);
+            lastFGPixels_ = rawFG;
+            prevRawFG_ = rawFG;
+
+            if (rawFG > 2000) {
+                lastRawContours_ = 0;
                 consecutiveDetections_ = 0;
-                lastRawContours_ = (int)0;
+                cooldownFrames_ = 2;
+                prevGray_ = gray.clone();
                 return d;
             }
+
+            if (flowMag > 1.0f) {
+                consecutiveDetections_ = 0;
+                cooldownFrames_ = std::max(cooldownFrames_, 2);
+            }
+
+            if (cooldownFrames_ > 0) {
+                if (rawFG < 300 && flowMag < 0.5f) {
+                    cooldownFrames_ = 0;
+                    postCooldownLR_ = 3;
+                } else {
+                    cooldownFrames_--;
+                    consecutiveDetections_ = 0;
+                    lastRawContours_ = 0;
+                    prevGray_ = gray.clone();
+                    return d;
+                }
+            }
+        } else {
+            // === MODE B: COMPENSATED FRAME DIFFERENCING ===
+            // Camera is moving — MOG2 is useless (whole frame = FG).
+            // Instead: warp previous frame into current frame coords, then absdiff.
+            // Camera motion is cancelled; only independently moving object remains.
+            framesSinceMotion_ = 0;
+
+            // Still feed MOG2 with high LR so background stays updated for mode A
+            mog2_->apply(gray, fgMask, 0.5);
+
+            if (!lastAffine_.empty() && !prevGray_.empty() && prevGray_.size() == gray.size()) {
+                cv::Mat warpedPrev;
+                cv::warpAffine(prevGray_, warpedPrev, lastAffine_, gray.size(),
+                               cv::INTER_LINEAR, cv::BORDER_REFLECT_101);
+
+                cv::Mat diff;
+                cv::absdiff(warpedPrev, gray, diff);
+
+                // Threshold: object motion typically produces diff > 25
+                cv::threshold(diff, fgMask, 25, 255, cv::THRESH_BINARY);
+
+                // Zero out edges — warp artifacts at borders
+                const int E = std::max(5, (int)std::ceil(flowMag) + 3);
+                if (E < fgMask.rows / 2 && E < fgMask.cols / 2) {
+                    fgMask.rowRange(0, E).setTo(0);
+                    fgMask.rowRange(fgMask.rows - E, fgMask.rows).setTo(0);
+                    fgMask.colRange(0, E).setTo(0);
+                    fgMask.colRange(fgMask.cols - E, fgMask.cols).setTo(0);
+                }
+
+                lastFGPixels_ = cv::countNonZero(fgMask);
+                prevRawFG_ = lastFGPixels_;
+            } else {
+                // No previous frame — can't do frame diff, skip
+                lastFGPixels_ = 0;
+                prevRawFG_ = 0;
+                fgMask = cv::Mat::zeros(gray.size(), CV_8UC1);
+            }
+
+            cooldownFrames_ = 0;  // No cooldown needed in frame-diff mode
         }
 
-        // Warp fgMask back to current frame coordinates for contour extraction
-        if (hasWarp) {
-            cv::Mat fgCurr;
-            cv::warpAffine(fgMask, fgCurr, lastAffine_, fgMask.size(),
-                           cv::INTER_NEAREST);
-            fgMask = fgCurr;
-        }
+        prevGray_ = gray.clone();
 
         // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
-        cv::findContours(fgMask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
         lastFGPixels_ = cv::countNonZero(fgMask);
         lastRawContours_ = (int)contours.size();
@@ -814,9 +831,9 @@ public:
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
 
             if (!atEdge &&
-                area >= 10.0 && area <= 1500.0 &&
+                area >= 3.0 && area <= 1500.0 &&
                 solidity > 0.2 &&
-                bbox.width >= 3 && bbox.height >= 3 &&
+                bbox.width >= 2 && bbox.height >= 2 &&
                 bbox.width <= 100 && bbox.height <= 100 &&
                 aspectRatio > 0.12 && aspectRatio < 8.0) {
 
@@ -853,9 +870,29 @@ public:
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
                     if (distance < 80.0) {  // at 0.25x = 320px full-res
-                        foundCandidate = true;
-                        consecutiveDetections_++;
-                        consecutiveMisses_ = 0;
+                        // Direction check: reject if moving back toward previous position
+                        // (MOG2 ghost at t-1 position looks like a valid nearby detection)
+                        bool directionOK = true;
+                        if (prevValidCenter_.x > 0 && distance > 3.0f) {
+                            cv::Point2f prevDir = lastValidCenter_ - prevValidCenter_;
+                            cv::Point2f newDir = currentCenter - lastValidCenter_;
+                            float dot = prevDir.x * newDir.x + prevDir.y * newDir.y;
+                            float prevMag = cv::norm(prevDir);
+                            if (prevMag > 3.0f && dot < -0.5f * prevMag * distance) {
+                                // New detection goes backward (>120° from prev direction)
+                                directionOK = false;
+                            }
+                        }
+                        if (directionOK) {
+                            foundCandidate = true;
+                            consecutiveDetections_++;
+                            consecutiveMisses_ = 0;
+                        } else {
+                            consecutiveDetections_ = 0;
+                            // Update anchor so we don't get stuck on stale reference points
+                            prevValidCenter_ = lastValidCenter_;
+                            lastValidCenter_ = currentCenter;
+                        }
                     } else {
                         consecutiveDetections_ = 0;
                         lastValidCenter_ = currentCenter;
@@ -896,7 +933,7 @@ private:
     cv::Mat kernel2_;
     cv::Mat kernel3_;
     cv::Mat prevGray_;    // uint8, for LK tracking
-    cv::Mat lastAffine_;  // prev→curr affine for motion compensation
+    cv::Mat lastAffine_;  // prev→curr affine for compensated frame diff
     cv::Point2f lastValidCenter_;
     cv::Point2f prevValidCenter_;  // one before lastValidCenter_ for direction check
     int consecutiveDetections_;
@@ -1174,7 +1211,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.7;   // smoothing factor per 10ms step (fast tracking)
+    const double ALPHA = 0.25;  // smoothing factor per 10ms step
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1230,6 +1267,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     // OF детектирует каждый кадр без settle.
     // Глобальное движение камеры компенсируется медианой flow.
 
+    // === PREDICTIVE COAST STATE ===
+    double coastVx = 0, coastVy = 0;     // last known velocity (px/s in full-res)
+    double coastLastX = 0, coastLastY = 0; // last detected position
+    auto coastLastDetectTime = std::chrono::steady_clock::now();
+
     // Для визуализации
     cv::Rect lastROI;
 
@@ -1267,14 +1309,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === FRAME PREPARATION ===
-        cv::Mat& display = f.frame;  // use directly, no clone needed (f is local copy from queue)
+        cv::Mat display = f.frame.clone();
         cv::Mat resized;
-        cv::resize(display, resized, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
+        cv::resize(f.frame, resized, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
         cv::Mat gray;
         cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
 
-        // Detection done at 0.25x scale
+        // === DETECTION (каждый кадр, без settle) ===
         Detection d = detector.detect(gray, 0, 0);
+
+        // Noise gate: >5 объектов после фильтрации = шум MOG2
+        if ((int)d.all_boxes.size() > 5) {
+            d.valid = false;
+            d.all_boxes.clear();
+            detector.resetConsecutive();
+        }
 
         // Scale → full-res
         if (d.valid) {
@@ -1385,17 +1434,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Lead correction: predict where object will be after detection delay
             // Require 3+ points for reliable velocity (2 points too noisy)
+            double vx = 0, vy = 0;
+            bool hasVelocity = false;
             if (velHistory.size() >= 3) {
                 auto& [t0, x0, y0] = velHistory.front();
                 auto& [t1, x1, y1] = velHistory.back();
                 double dt = t1 - t0;
                 if (dt > 0.05 && dt < 2.0) {
-                    double vx = (x1 - x0) / dt;
-                    double vy = (y1 - y0) / dt;
+                    vx = (x1 - x0) / dt;
+                    vy = (y1 - y0) / dt;
+                    hasVelocity = true;
                     const double LEAD_TIME = 0.12; // predict 120ms ahead
                     double leadX = vx * LEAD_TIME;
                     double leadY = vy * LEAD_TIME;
-                    // Clamp lead to ±40px: prevent wild jumps from noisy velocity
+                    // Clamp lead to ±60px: prevent wild jumps from noisy velocity
                     const double MAX_LEAD = 60.0;
                     if (leadX > MAX_LEAD) leadX = MAX_LEAD;
                     if (leadX < -MAX_LEAD) leadX = -MAX_LEAD;
@@ -1405,6 +1457,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     ey += leadY;
                 }
             }
+
+            // Save velocity for coast mode
+            if (hasVelocity) {
+                coastVx = vx;
+                coastVy = vy;
+            }
+            coastLastDetectTime = std::chrono::steady_clock::now();
+            coastLastX = d.x;
+            coastLastY = d.y;
 
             // Clamp max error: >200px from center = likely false detection
             const double MAX_ERR = 200.0;
@@ -1420,7 +1481,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Adaptive Kp: softer near center, full strength far away
             double dist = std::sqrt(ex * ex + ey * ey);
-            double Kp = DEG_PER_PX * std::min(1.0, 0.5 + 0.5 * (dist / 200.0));
+            double Kp = DEG_PER_PX * std::min(1.0, 0.3 + 0.7 * (dist / 200.0));
             double Kd = 0.004;  // derivative gain (damps approach)
 
             double dex = (ex - prevEx) / dt;
@@ -1433,8 +1494,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew rate limiter: max degrees per frame (~20fps → 80°/s)
-            const double MAX_STEP_DEG = 4.0;
+            // Slew rate limiter: max degrees per frame (~20fps → 16°/s)
+            const double MAX_STEP_DEG = 0.8;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
@@ -1456,6 +1517,49 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastSentPitchDeg = pitchDeg;
 
             // Без settle: OF компенсирует движение камеры
+        }
+        // === PREDICTIVE COAST: keep tracking by extrapolation when detection is lost ===
+        else if (!d.valid && currentTrackingEnabled && !scanActive) {
+            auto now = std::chrono::steady_clock::now();
+            double sinceLastDetect = std::chrono::duration<double>(now - coastLastDetectTime).count();
+            const double COAST_MAX_SEC = 0.8; // coast for up to 800ms
+
+            if (sinceLastDetect < COAST_MAX_SEC && sinceLastDetect > 0.02 &&
+                (std::abs(coastVx) > 5.0 || std::abs(coastVy) > 5.0)) {
+                // Extrapolate object position from last detection + velocity
+                double predX = coastLastX + coastVx * sinceLastDetect;
+                double predY = coastLastY + coastVy * sinceLastDetect;
+
+                double ex = predX - cx;
+                double ey = predY - cy;
+
+                const double MAX_ERR = 300.0;
+                if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
+                if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
+
+                double Kp = DEG_PER_PX * 0.7; // slightly conservative during coast
+                double stepYaw   = Kp * ex;
+                double stepPitch = Kp * ey;
+
+                const double MAX_STEP_DEG = 0.8;
+                if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
+                if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
+                if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
+                if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
+
+                yawDeg   = lastYawDeg   - stepYaw;
+                pitchDeg = lastPitchDeg - stepPitch;
+
+                if (yawDeg < 5.0) yawDeg = 5.0;
+                if (yawDeg > 175.0) yawDeg = 175.0;
+                if (pitchDeg < 5.0) pitchDeg = 5.0;
+                if (pitchDeg > 175.0) pitchDeg = 175.0;
+
+                lastYawDeg = yawDeg;
+                lastPitchDeg = pitchDeg;
+                servoTargetYaw.store(yawDeg);
+                servoTargetPitch.store(pitchDeg);
+            }
         }
 
         // ROI для визуализации
@@ -1538,12 +1642,13 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Draw bright green rectangles around all detected moving objects with labels
         int objCounter = 0;
         for (const auto& box : d.all_boxes) {
-            cv::rectangle(display, box, cv::Scalar(0,255,0), 3);
-            // Lightweight tint: darken box region instead of full-frame clone+addWeighted
-            cv::Rect safeBox = box & cv::Rect(0, 0, display.cols, display.rows);
-            if (safeBox.area() > 0)
-                display(safeBox) *= 0.85;
+            cv::rectangle(display, box, cv::Scalar(0,255,0), 3);  // Thicker border
+            // Add semi-transparent fill
+            cv::Mat overlay = display.clone();
+            cv::rectangle(overlay, box, cv::Scalar(0,255,0), -1);
+            cv::addWeighted(overlay, 0.15, display, 0.85, 0, display);
             
+            // Label each object
             objCounter++;
             std::string label = "OBJ" + std::to_string(objCounter);
             cv::putText(display, label, cv::Point(box.x, box.y - 5), 
@@ -1644,9 +1749,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             int bx = display.cols - boxW - 10;
             int by = display.rows - boxH - 10;
 
-            // Opaque background (no full-frame clone needed)
-            cv::rectangle(display, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
+            cv::Mat overlay = display.clone();
+            cv::rectangle(overlay, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
                          cv::Scalar(0, 0, 0), -1);
+            cv::addWeighted(overlay, 0.6, display, 0.4, 0, display);
             cv::rectangle(display, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
                          cv::Scalar(0, 255, 255), 2);
 
@@ -1738,14 +1844,10 @@ int main()
             
             if (!frame.empty()) {
                 cv::imshow("Predictive Gimbal Control", frame);
-                // Update HTTP MJPEG stream frame (resize OUTSIDE mutex to avoid blocking)
+                // Update HTTP MJPEG stream frame
                 if (streamRunning) {
-                    cv::Mat tempResized;
-                    cv::resize(frame, tempResized, cv::Size(1600, 900));
-                    {
-                        std::lock_guard<std::mutex> lock(streamMutex);
-                        streamFrame = tempResized;
-                    }
+                    std::lock_guard<std::mutex> lock(streamMutex);
+                    cv::resize(frame, streamFrame, cv::Size(1600, 900));
                 }
             }
         }

@@ -1882,8 +1882,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Spatial rescue: if the best detection is close to lastKnown position,
         // trust it even during noise — spatial coherence overrides blob count.
         bool noiseTriggered = false;
-        if (!rejectReason && fgPx > 2000 && (int)d.all_boxes.size() > 3) noiseTriggered = true;
-        if (!rejectReason && !noiseTriggered && fgPx > 1500 && (int)d.all_boxes.size() > 6) noiseTriggered = true;
+        if (!rejectReason && fgPx > 2500 && (int)d.all_boxes.size() > 5) noiseTriggered = true;
+        if (!rejectReason && !noiseTriggered && fgPx > 2000 && (int)d.all_boxes.size() > 10) noiseTriggered = true;
 
         if (noiseTriggered) {
             bool rescued = false;
@@ -1891,7 +1891,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 float dx = d.x - searchPt.x;
                 float dy = d.y - searchPt.y;
                 float dist = std::sqrt(dx * dx + dy * dy);
-                if (dist < 30.0f) rescued = true;  // 30px at 480×270
+                if (dist < 60.0f) rescued = true;  // 60px at 480×270 (~2× for fast motion)
             }
             if (!rescued) {
                 d.valid = false;

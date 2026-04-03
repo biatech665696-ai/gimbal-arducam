@@ -1548,18 +1548,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Adaptive slew limit: base 4° (68°/s), up to 8° (136°/s) when
-            // FF velocity demands it. High slew only when tracking fast object,
-            // not on noise/static — so MOG2 stays stable.
-            double worldSpeed = std::sqrt(vx * vx + vy * vy);  // deg/s
-            double MAX_STEP_DEG = 4.0 + std::min(4.0, worldSpeed * 0.04);  // scales up with speed
+            // Slew limit: 4° = 68°/s at 17fps
+            const double MAX_STEP_DEG = 4.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
             if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
 
-            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f P=(%.2f,%.2f) D=(%.2f,%.2f) FF=(%.2f,%.2f) step=(%.2f,%.2f) slew=%.1f spd=%.0f\n",
-                    ex, ey, dist, Kp*ex, Kp*ey, Kd*dex, Kd*dey, ffYaw, ffPitch, stepYaw, stepPitch, MAX_STEP_DEG, worldSpeed);
+            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f P=(%.2f,%.2f) D=(%.2f,%.2f) FF=(%.2f,%.2f) step=(%.2f,%.2f)\n",
+                    ex, ey, dist, Kp*ex, Kp*ey, Kd*dex, Kd*dey, ffYaw, ffPitch, stepYaw, stepPitch);
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

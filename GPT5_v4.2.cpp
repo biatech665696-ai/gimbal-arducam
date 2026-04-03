@@ -1454,17 +1454,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     vx = (x1 - x0) / dt;
                     vy = (y1 - y0) / dt;
                     hasVelocity = true;
-                    const double LEAD_TIME = 0.12; // predict 120ms ahead
-                    double leadX = vx * LEAD_TIME;
-                    double leadY = vy * LEAD_TIME;
-                    // Clamp lead to ±60px: prevent wild jumps from noisy velocity
-                    const double MAX_LEAD = 60.0;
-                    if (leadX > MAX_LEAD) leadX = MAX_LEAD;
-                    if (leadX < -MAX_LEAD) leadX = -MAX_LEAD;
-                    if (leadY > MAX_LEAD) leadY = MAX_LEAD;
-                    if (leadY < -MAX_LEAD) leadY = -MAX_LEAD;
-                    ex += leadX;
-                    ey += leadY;
+                    // No lead prediction — hurts circular motion (tangential overshoot)
                 }
             }
 
@@ -1482,10 +1472,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // NON-LINEAR controller with velocity feedforward
-            // 1) Position term: soft near center, strong at edges (quadratic ramp)
-            //    Prevents overshoot near center while catching up at edges
-            // 2) Velocity feedforward: match object speed directly in deg/frame
+            // PURE P-D controller — no feedforward, no prediction
+            // For circular/curved motion, strong proportional tracking is better
+            // than linear prediction that always misses the curve
             static double prevEx = 0.0, prevEy = 0.0;
             static auto prevTime = std::chrono::steady_clock::now();
             auto nowTime = std::chrono::steady_clock::now();
@@ -1494,28 +1483,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double dist = std::sqrt(ex * ex + ey * ey);
 
-            // Position term: quadratic ramp — gentle near center, aggressive far
-            // At 10px: factor=0.5, at 50px: factor=0.54, at 100px: factor=0.67, at 200px: factor=1.0
-            double posFactor = std::min(1.0, 0.5 + 0.5 * (dist / 200.0) * (dist / 200.0));
-            double Kp = DEG_PER_PX * posFactor * 1.5;  // 1.5x base gain for faster catch-up
+            // Strong P: near-full gain everywhere, only damped within 15px
+            double Kp = DEG_PER_PX * 2.5;
+            if (dist < 15.0) Kp *= (0.3 + 0.7 * dist / 15.0);
 
-            // Velocity feedforward: convert px/s velocity directly to deg/frame
-            double ffYaw = 0.0, ffPitch = 0.0;
-            if (hasVelocity) {
-                // vx, vy are in px/s at full resolution
-                // Convert to deg/frame: px/s * deg/px * dt_frame
-                double dtFrame = dt;  // time since last control update
-                ffYaw   = vx * DEG_PER_PX * dtFrame * 0.8;  // 80% of predicted velocity
-                ffPitch = vy * DEG_PER_PX * dtFrame * 0.8;
-            }
-
-            // D-term: only for damping oscillation, not for speed
+            // D-term: damp oscillation near target
             double Kd = 0.003;
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
-            double stepYaw   = Kp * ex + Kd * dex + ffYaw;
-            double stepPitch = Kp * ey + Kd * dey + ffPitch;
+            double stepYaw   = Kp * ex + Kd * dex;
+            double stepPitch = Kp * ey + Kd * dey;
 
             prevEx = ex;
             prevEy = ey;

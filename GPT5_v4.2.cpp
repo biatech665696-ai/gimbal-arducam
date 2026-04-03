@@ -1519,7 +1519,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dey = (ey - prevEy) / dt;
 
             // Feedforward from world velocity (deg/s → deg/frame)
-            double FF = 0.5;
+            double FF = 1.0;
             double ffYaw   = hasVelocity ? FF * vx * dt : 0.0;  // vx already in deg/s
             double ffPitch = hasVelocity ? FF * vy * dt : 0.0;
 

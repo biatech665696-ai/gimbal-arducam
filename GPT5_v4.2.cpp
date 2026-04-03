@@ -1229,7 +1229,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.8;  // faster convergence to predicted target
+    const double ALPHA = 0.9;  // faster convergence to predicted target
 
     while (run.load()) {
         double baseYaw   = servoTargetYaw.load();

@@ -1482,10 +1482,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // NON-LINEAR controller with velocity feedforward
-            // Position: strong everywhere, soft only very near center (< 20px)
-            // Velocity FF: match object speed to prevent lag
-            // High maxStep allowed because detection is valid — servo won't runaway
+            // NON-LINEAR controller with velocity feedforward + flow damping
+            // Key: use optical flow as actual servo velocity feedback.
+            // If camera already moving in correct direction, reduce command.
             static double prevEx = 0.0, prevEy = 0.0;
             static auto prevTime = std::chrono::steady_clock::now();
             auto nowTime = std::chrono::steady_clock::now();
@@ -1494,7 +1493,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double dist = std::sqrt(ex * ex + ey * ey);
 
-            // Position term: full gain, soft only within 20px deadzone
+            // Position term: full gain, soft only within 20px
             double Kp = DEG_PER_PX * 2.0;
             if (dist < 20.0) Kp *= (0.4 + 0.6 * dist / 20.0);
 
@@ -1506,19 +1505,28 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 ffPitch = vy * DEG_PER_PX * dtFrame;
             }
 
-            double Kd = 0.002;
+            // Error derivative for conventional D-term
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
+            double Kd = 0.002;
 
             double stepYaw   = Kp * ex + Kd * dex + ffYaw;
             double stepPitch = Kp * ey + Kd * dey + ffPitch;
+
+            // FLOW DAMPING: subtract current camera velocity (in deg) from command
+            // Optical flow = camera motion in px/frame. If servo already moving
+            // in the right direction, this reduces the command → prevents overshoot.
+            cv::Point2f gf = detector.lastGlobalFlow();
+            double camVelYaw   = gf.x * DEG_PER_PX;  // current camera speed in deg
+            double camVelPitch = gf.y * DEG_PER_PX;
+            stepYaw   -= camVelYaw   * 0.7;  // 70% damping
+            stepPitch -= camVelPitch * 0.7;
 
             prevEx = ex;
             prevEy = ey;
             prevTime = nowTime;
 
-            // HIGH slew limit — safe because we have valid detection
-            // If detection is lost, coast section below uses much lower limit
+            // High slew limit — flow damping prevents runaway
             const double MAX_STEP_DEG = 5.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;

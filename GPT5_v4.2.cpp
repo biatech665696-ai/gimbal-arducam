@@ -744,13 +744,23 @@ public:
         // Remove shadows (MOG2 marks as 127 when detectShadows=true)
         cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
 
+        // Zero warp-artifact edges in model space BEFORE counting FG pixels.
+        // Without this, border reflections inflate rawFG → trigger FG gate → no detection.
+        if (hasWarp) {
+            const int E = std::max(4, (int)std::ceil(flowMag) + 2);
+            if (E < fgMask.rows / 2 && E < fgMask.cols / 2) {
+                fgMask.rowRange(0, E).setTo(0);
+                fgMask.rowRange(fgMask.rows - E, fgMask.rows).setTo(0);
+                fgMask.colRange(0, E).setTo(0);
+                fgMask.colRange(fgMask.cols - E, fgMask.cols).setTo(0);
+            }
+        }
+
         int rawFG = cv::countNonZero(fgMask);
         lastFGPixels_ = rawFG;
         prevRawFG_ = rawFG;
 
         // === FG PIXEL GATE ===
-        // With warp compensation, threshold can be higher — most camera
-        // motion noise is already removed. Only extreme spikes are rejected.
         if (rawFG > 4000) {
             lastRawContours_ = 0;
             consecutiveDetections_ = 0;
@@ -760,10 +770,9 @@ public:
 
         // === COOLDOWN (adaptive: exit early when FG settles) ===
         if (cooldownFrames_ > 0) {
-            if (rawFG < 300 && flowMag < 0.5f) {
+            if (rawFG < 300) {
                 cooldownFrames_ = 0;  // FG settled, end cooldown early
-                postCooldownLR_ = 3;  // boost LR to absorb residuals
-                // Don't reset consecutive — scene is clean, allow immediate detection
+                postCooldownLR_ = 3;
             } else {
                 cooldownFrames_--;
                 consecutiveDetections_ = 0;
@@ -778,12 +787,6 @@ public:
             cv::warpAffine(fgMask, fgCurr, lastAffine_, fgMask.size(),
                            cv::INTER_NEAREST);
             fgMask = fgCurr;
-            // Zero out edges (warp artifacts)
-            const int E = 4;
-            fgMask.rowRange(0, E).setTo(0);
-            fgMask.rowRange(fgMask.rows - E, fgMask.rows).setTo(0);
-            fgMask.colRange(0, E).setTo(0);
-            fgMask.colRange(fgMask.cols - E, fgMask.cols).setTo(0);
         }
 
         // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
@@ -850,29 +853,9 @@ public:
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
                     if (distance < 80.0) {  // at 0.25x = 320px full-res
-                        // Direction check: reject if moving back toward previous position
-                        // (MOG2 ghost at t-1 position looks like a valid nearby detection)
-                        bool directionOK = true;
-                        if (prevValidCenter_.x > 0 && distance > 3.0f) {
-                            cv::Point2f prevDir = lastValidCenter_ - prevValidCenter_;
-                            cv::Point2f newDir = currentCenter - lastValidCenter_;
-                            float dot = prevDir.x * newDir.x + prevDir.y * newDir.y;
-                            float prevMag = cv::norm(prevDir);
-                            if (prevMag > 3.0f && dot < -0.5f * prevMag * distance) {
-                                // New detection goes backward (>120° from prev direction)
-                                directionOK = false;
-                            }
-                        }
-                        if (directionOK) {
-                            foundCandidate = true;
-                            consecutiveDetections_++;
-                            consecutiveMisses_ = 0;
-                        } else {
-                            consecutiveDetections_ = 0;
-                            // Update anchor so we don't get stuck on stale reference points
-                            prevValidCenter_ = lastValidCenter_;
-                            lastValidCenter_ = currentCenter;
-                        }
+                        foundCandidate = true;
+                        consecutiveDetections_++;
+                        consecutiveMisses_ = 0;
                     } else {
                         consecutiveDetections_ = 0;
                         lastValidCenter_ = currentCenter;

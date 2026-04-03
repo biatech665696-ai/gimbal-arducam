@@ -1495,9 +1495,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dist = std::sqrt(ex * ex + ey * ey);
 
             // Position term: quadratic ramp — gentle near center, aggressive far
-            // At 10px: factor=0.3, at 50px: factor=0.55, at 200px: factor=1.0
-            double posFactor = std::min(1.0, 0.3 + 0.7 * (dist / 200.0) * (dist / 200.0));
-            double Kp = DEG_PER_PX * posFactor;
+            // At 10px: factor=0.5, at 50px: factor=0.54, at 100px: factor=0.67, at 200px: factor=1.0
+            double posFactor = std::min(1.0, 0.5 + 0.5 * (dist / 200.0) * (dist / 200.0));
+            double Kp = DEG_PER_PX * posFactor * 1.5;  // 1.5x base gain for faster catch-up
 
             // Velocity feedforward: convert px/s velocity directly to deg/frame
             double ffYaw = 0.0, ffPitch = 0.0;

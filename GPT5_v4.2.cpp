@@ -1372,12 +1372,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Объект на ex пикселей от центра = ex * (FOV/width) градусов от серво
         // Коэффициент 1.5x компенсирует задержку камера→детект→серво (~50-100мс)
         // === VELOCITY ESTIMATION (for lead correction) ===
-        static std::deque<std::tuple<double, double, double>> velHistory; // time, x, y
+        static std::deque<std::tuple<double, double, double>> velHistory; // time, worldX_deg, worldY_deg
         if (modeJustChanged) velHistory.clear();
         if (d.valid) {
             double now = std::chrono::duration<double>(
                 std::chrono::steady_clock::now().time_since_epoch()).count();
-            velHistory.push_back({now, d.x, d.y});
+            // World position = servo angle + object offset from center (in degrees)
+            double worldX = lastYawDeg   + (d.x - cx) * (72.0 / 1920.0);
+            double worldY = lastPitchDeg + (d.y - cy) * (72.0 / 1920.0);
+            velHistory.push_back({now, worldX, worldY});
             while (velHistory.size() > 8) velHistory.pop_front();
         }
 
@@ -1468,17 +1471,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Lead correction: predict where object will be after detection delay
             // Require 3+ points for reliable velocity (2 points too noisy)
-            double vx = 0, vy = 0;
+            double vx = 0, vy = 0;  // world velocity in deg/s
             bool hasVelocity = false;
             if (velHistory.size() >= 3) {
                 auto& [t0, x0, y0] = velHistory.front();
                 auto& [t1, x1, y1] = velHistory.back();
                 double dt = t1 - t0;
                 if (dt > 0.05 && dt < 2.0) {
-                    vx = (x1 - x0) / dt;
+                    vx = (x1 - x0) / dt;  // now in deg/s (world coords)
                     vy = (y1 - y0) / dt;
                     hasVelocity = true;
-                    // No lead prediction — hurts circular motion (tangential overshoot)
                 }
             }
 
@@ -1516,11 +1518,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
-            // Feedforward: add object velocity directly to servo command
-            // so servo tracks speed, not just position error
-            double FF = 1.0;
-            double ffYaw   = hasVelocity ? FF * vx * DEG_PER_PX : 0.0;
-            double ffPitch = hasVelocity ? FF * vy * DEG_PER_PX : 0.0;
+            // Feedforward from world velocity (deg/s → deg/frame)
+            double FF = 0.5;
+            double ffYaw   = hasVelocity ? FF * vx * dt : 0.0;  // vx already in deg/s
+            double ffPitch = hasVelocity ? FF * vy * dt : 0.0;
 
             double stepYaw   = Kp * ex + Kd * dex + ffYaw;
             double stepPitch = Kp * ey + Kd * dey + ffPitch;
@@ -1529,8 +1530,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew limit: 6° = 102°/s at 17fps
-            const double MAX_STEP_DEG = 6.0;
+            // Slew limit: 4° = 68°/s at 17fps
+            const double MAX_STEP_DEG = 4.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
@@ -1556,8 +1557,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Publish velocity for 100Hz inter-frame prediction (dual-loop inner loop)
             if (hasVelocity) {
-                servoVelYaw.store(-vx * DEG_PER_PX);   // negative: object moves right → servo goes left
-                servoVelPitch.store(-vy * DEG_PER_PX);
+                servoVelYaw.store(-vx);   // vx now in deg/s (world), negative: track direction
+                servoVelPitch.store(-vy);
             } else {
                 servoVelYaw.store(0.0);
                 servoVelPitch.store(0.0);

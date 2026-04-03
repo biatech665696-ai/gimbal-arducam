@@ -708,101 +708,73 @@ public:
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === DUAL-MODE DETECTION ===
-        // Mode A (stable camera, flow < 2px): MOG2 — best for small/slow objects
-        // Mode B (camera moving, flow >= 2px): Compensated frame differencing —
-        //   warp prev frame into curr coords, absdiff → only independent motion remains
+        // === DUAL-MODE DETECTION (select best, not OR) ===
+        // Mode A: MOG2           — when camera stable, background model adapted
+        // Mode B: Compensated frame-diff — during/after camera motion (affine warp)
         cv::Mat fgMask;
 
-        if (flowMag < 2.0f) {
-            // === MODE A: MOG2 ===
-            double lr;
-            if (prevRawFG_ > 5000 && flowMag < 1.0f) {
-                lr = 0.3;
-            } else if (framesSinceMotion_ < 3) {
-                lr = 0.2;
-                framesSinceMotion_++;
-            } else {
-                lr = 0.008;
-                if (postCooldownLR_ > 0) {
-                    lr = 0.08;
-                    postCooldownLR_--;
-                }
-            }
-
-            mog2_->apply(gray, fgMask, lr);
-            cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
-
-            int rawFG = cv::countNonZero(fgMask);
-            lastFGPixels_ = rawFG;
-            prevRawFG_ = rawFG;
-
-            if (rawFG > 2000) {
-                lastRawContours_ = 0;
-                consecutiveDetections_ = 0;
-                cooldownFrames_ = 2;
-                prevGray_ = gray.clone();
-                return d;
-            }
-
-            if (flowMag > 1.0f) {
-                consecutiveDetections_ = 0;
-                cooldownFrames_ = std::max(cooldownFrames_, 2);
-            }
-
-            if (cooldownFrames_ > 0) {
-                if (rawFG < 300 && flowMag < 0.5f) {
-                    cooldownFrames_ = 0;
-                    postCooldownLR_ = 3;
-                } else {
-                    cooldownFrames_--;
-                    consecutiveDetections_ = 0;
-                    lastRawContours_ = 0;
-                    prevGray_ = gray.clone();
-                    return d;
-                }
-            }
+        // --- Always feed MOG2 to keep background model updated ---
+        cv::Mat maskA;
+        double lr;
+        if (flowMag >= 2.0f) {
+            lr = 0.5;
+        } else if (prevRawFG_ > 5000 && flowMag < 1.0f) {
+            lr = 0.3;
+        } else if (framesSinceMotion_ < 5) {
+            lr = 0.15;
         } else {
-            // === MODE B: COMPENSATED FRAME DIFFERENCING ===
-            // Camera is moving — MOG2 is useless (whole frame = FG).
-            // Instead: warp previous frame into current frame coords, then absdiff.
-            // Camera motion is cancelled; only independently moving object remains.
-            framesSinceMotion_ = 0;
-
-            // Still feed MOG2 with high LR so background stays updated for mode A
-            mog2_->apply(gray, fgMask, 0.5);
-
-            if (!lastAffine_.empty() && !prevGray_.empty() && prevGray_.size() == gray.size()) {
-                cv::Mat warpedPrev;
-                cv::warpAffine(prevGray_, warpedPrev, lastAffine_, gray.size(),
-                               cv::INTER_LINEAR, cv::BORDER_REFLECT_101);
-
-                cv::Mat diff;
-                cv::absdiff(warpedPrev, gray, diff);
-
-                // Threshold: object motion typically produces diff > 25
-                cv::threshold(diff, fgMask, 25, 255, cv::THRESH_BINARY);
-
-                // Zero out edges — warp artifacts at borders
-                const int E = std::max(5, (int)std::ceil(flowMag) + 3);
-                if (E < fgMask.rows / 2 && E < fgMask.cols / 2) {
-                    fgMask.rowRange(0, E).setTo(0);
-                    fgMask.rowRange(fgMask.rows - E, fgMask.rows).setTo(0);
-                    fgMask.colRange(0, E).setTo(0);
-                    fgMask.colRange(fgMask.cols - E, fgMask.cols).setTo(0);
-                }
-
-                lastFGPixels_ = cv::countNonZero(fgMask);
-                prevRawFG_ = lastFGPixels_;
-            } else {
-                // No previous frame — can't do frame diff, skip
-                lastFGPixels_ = 0;
-                prevRawFG_ = 0;
-                fgMask = cv::Mat::zeros(gray.size(), CV_8UC1);
-            }
-
-            cooldownFrames_ = 0;  // No cooldown needed in frame-diff mode
+            lr = 0.008;
+            if (postCooldownLR_ > 0) { lr = 0.08; postCooldownLR_--; }
         }
+        mog2_->apply(gray, maskA, lr);
+        cv::threshold(maskA, maskA, 200, 255, cv::THRESH_BINARY);
+        int rawFG = cv::countNonZero(maskA);
+        prevRawFG_ = rawFG;
+
+        // --- Mode B: Compensated frame-diff ---
+        cv::Mat maskB;
+        bool haveMaskB = false;
+        if (!lastAffine_.empty() && !prevGray_.empty() && prevGray_.size() == gray.size()) {
+            cv::Mat warpedPrev;
+            cv::warpAffine(prevGray_, warpedPrev, lastAffine_, gray.size(),
+                           cv::INTER_LINEAR, cv::BORDER_REFLECT_101);
+            cv::absdiff(warpedPrev, gray, maskB);
+            cv::threshold(maskB, maskB, 25, 255, cv::THRESH_BINARY);
+
+            const int E = std::max(5, (int)std::ceil(flowMag) + 3);
+            if (E < maskB.rows / 2 && E < maskB.cols / 2) {
+                maskB.rowRange(0, E).setTo(0);
+                maskB.rowRange(maskB.rows - E, maskB.rows).setTo(0);
+                maskB.colRange(0, E).setTo(0);
+                maskB.colRange(maskB.cols - E, maskB.cols).setTo(0);
+            }
+            haveMaskB = true;
+        }
+
+        // --- Select best mode ---
+        if (rawFG < 1500 && flowMag < 2.0f) {
+            // Mode A: MOG2 is clean and camera mostly stable
+            fgMask = maskA;
+        } else if (haveMaskB && flowMag >= 1.0f) {
+            // Mode B: camera actually moving → use compensated frame-diff
+            fgMask = maskB;
+        } else if (rawFG < 3000) {
+            // Transition: camera barely moving, MOG2 recovering — use MOG2 anyway
+            fgMask = maskA;
+        } else if (haveMaskB) {
+            // MOG2 completely broken, no choice — use frame-diff
+            fgMask = maskB;
+        } else {
+            fgMask = maskA;
+        }
+
+        lastFGPixels_ = rawFG;
+
+        // Update motion tracking
+        if (flowMag >= 2.0f)
+            framesSinceMotion_ = 0;
+        else if (framesSinceMotion_ < 999)
+            framesSinceMotion_++;
 
         prevGray_ = gray.clone();
 
@@ -846,6 +818,10 @@ public:
         cv::Point2f currentCenter(-1, -1);
         bool foundCandidate = false;
 
+        // Adaptive distance threshold: larger when camera moving fast
+        // After 3+ misses: accept any closest contour (re-acquire mode)
+        float maxDist = (consecutiveMisses_ >= 3) ? 9999.0f : (80.0f + flowMag * 15.0f);
+
         if (!validObjects.empty()) {
             int bestIdx = validObjects[0].second;
             if (lastValidCenter_.x > 0) {
@@ -869,9 +845,8 @@ public:
 
                 if (lastValidCenter_.x > 0) {
                     float distance = cv::norm(currentCenter - lastValidCenter_);
-                    if (distance < 80.0) {  // at 0.25x = 320px full-res
-                        // Direction check: reject if moving back toward previous position
-                        // (MOG2 ghost at t-1 position looks like a valid nearby detection)
+                    if (distance < maxDist) {
+                        // Direction check: reject if moving backward (ghost detection)
                         bool directionOK = true;
                         if (prevValidCenter_.x > 0 && distance > 3.0f) {
                             cv::Point2f prevDir = lastValidCenter_ - prevValidCenter_;
@@ -879,7 +854,6 @@ public:
                             float dot = prevDir.x * newDir.x + prevDir.y * newDir.y;
                             float prevMag = cv::norm(prevDir);
                             if (prevMag > 3.0f && dot < -0.5f * prevMag * distance) {
-                                // New detection goes backward (>120° from prev direction)
                                 directionOK = false;
                             }
                         }
@@ -923,6 +897,42 @@ public:
             consecutiveDetections_ = 0;
             if (consecutiveMisses_ > MAX_MISSES)
                 lastValidCenter_ = cv::Point2f(-1, -1);
+        }
+
+        // DIAG: why detection failed
+        if (!d.valid) {
+            const char* reason = "unknown";
+            if (validObjects.empty()) reason = "NO_VALID_OBJ";
+            else if (lastValidCenter_.x < 0) reason = "NO_ANCHOR";
+            else {
+                // find actual closest distance
+                float closestDist = 1e9f;
+                for (const auto& vo : validObjects) {
+                    cv::Moments mm = cv::moments(contours[vo.second]);
+                    if (mm.m00 <= 0) continue;
+                    cv::Point2f cc((mm.m10/mm.m00)+ox, (mm.m01/mm.m00)+oy);
+                    float dd = cv::norm(cc - lastValidCenter_);
+                    if (dd < closestDist) closestDist = dd;
+                }
+                if (closestDist >= maxDist) reason = "DIST_REJECT";
+                else reason = "DIR_REJECT";
+            }
+            fprintf(stderr, "MISS[%s]: validObj=%d flow=%.1f rawFG=%d ctr=%d maxD=%.0f miss=%d",
+                    reason, (int)validObjects.size(), flowMag, rawFG, lastRawContours_,
+                    maxDist, consecutiveMisses_);
+            if (!validObjects.empty() && lastValidCenter_.x > 0) {
+                float closestDist = 1e9f;
+                for (const auto& vo : validObjects) {
+                    cv::Moments mm = cv::moments(contours[vo.second]);
+                    if (mm.m00 <= 0) continue;
+                    cv::Point2f cc((mm.m10/mm.m00)+ox, (mm.m01/mm.m00)+oy);
+                    float dd = cv::norm(cc - lastValidCenter_);
+                    if (dd < closestDist) closestDist = dd;
+                }
+                fprintf(stderr, " closestDist=%.1f lastValid=(%.0f,%.0f)",
+                        closestDist, lastValidCenter_.x, lastValidCenter_.y);
+            }
+            fprintf(stderr, "\n");
         }
 
         return d;

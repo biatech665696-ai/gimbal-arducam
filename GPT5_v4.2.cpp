@@ -694,12 +694,12 @@ public:
 
                 if (goodPrev.size() >= 4) {
                     cv::Mat inlierMask;
-                    cv::Mat affine = cv::estimateAffinePartial2D(
+                    lastAffine_ = cv::estimateAffinePartial2D(
                         goodPrev, goodCurr, inlierMask, cv::RANSAC, 3.0);
-                    if (!affine.empty()) {
+                    if (!lastAffine_.empty()) {
                         lastGlobalFlow_ = cv::Point2f(
-                            (float)affine.at<double>(0, 2),
-                            (float)affine.at<double>(1, 2));
+                            (float)lastAffine_.at<double>(0, 2),
+                            (float)lastAffine_.at<double>(1, 2));
                     }
                 }
             }
@@ -710,30 +710,36 @@ public:
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
+        // === MOTION-COMPENSATED MOG2 ===
+        // Warp current frame into model (previous) space so camera motion
+        // is removed BEFORE background subtraction. This keeps the object
+        // as foreground even while the servo is moving.
+        cv::Mat warped = gray;
+        bool hasWarp = !lastAffine_.empty();
+        if (hasWarp) {
+            // lastAffine_ maps prev→curr; with WARP_INVERSE_MAP OpenCV uses
+            // it as dst→src, i.e. model→current, which warps current into model space.
+            cv::warpAffine(gray, warped, lastAffine_, gray.size(),
+                           cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
+                           cv::BORDER_REFLECT_101);
+        }
+
         // === ADAPTIVE MOG2 LEARNING RATE ===
-        // Camera moving → high LR: absorb new background in 1-2 frames
-        // Auto-exposure spike (high fg, no flow) → medium LR to absorb brightness shift
-        // Camera stable → low LR: object stays foreground for detection
+        // With warp compensation, camera motion is already removed.
+        // Only need high LR for auto-exposure spikes.
         double lr;
-        if (flowMag > 2.0f) {
-            lr = 0.5;               // Camera motion: fast absorb new bg
-            framesSinceMotion_ = 0;
-        } else if (prevRawFG_ > 5000 && flowMag < 1.0f) {
+        if (prevRawFG_ > 5000 && flowMag < 1.0f) {
             lr = 0.3;               // Auto-exposure spike: absorb brightness change
-        } else if (framesSinceMotion_ < 3) {
-            lr = 0.2;               // Post-motion transition
-            framesSinceMotion_++;
+        } else if (postCooldownLR_ > 0) {
+            lr = 0.08;              // Post-cooldown: absorb residuals faster
+            postCooldownLR_--;
         } else {
-            lr = 0.008;             // Stable: moderate learning (trail absorbed ~7s)
-            if (postCooldownLR_ > 0) {
-                lr = 0.08;           // Post-cooldown: absorb residuals faster
-                postCooldownLR_--;
-            }
+            lr = 0.005;             // Stable: slow learning keeps object visible
         }
 
         // === MOG2 FOREGROUND DETECTION ===
         cv::Mat fgMask;
-        mog2_->apply(gray, fgMask, lr);
+        mog2_->apply(warped, fgMask, lr);
 
         // Remove shadows (MOG2 marks as 127 when detectShadows=true)
         cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
@@ -743,20 +749,13 @@ public:
         prevRawFG_ = rawFG;
 
         // === FG PIXEL GATE ===
-        // High fg = camera shift noise. Reset consecutive to prevent
-        // noise carry-over to first clean frame.
-        if (rawFG > 2000) {
+        // With warp compensation, threshold can be higher — most camera
+        // motion noise is already removed. Only extreme spikes are rejected.
+        if (rawFG > 4000) {
             lastRawContours_ = 0;
             consecutiveDetections_ = 0;
-            cooldownFrames_ = 2;  // require 2 clean frames after noise (adaptive exit)
+            cooldownFrames_ = 2;
             return d;
-        }
-
-        // === OF VALIDATION ===
-        // Camera still moving (flow>1.0) but FG below gate → residual noise
-        if (flowMag > 1.0f) {
-            consecutiveDetections_ = 0;
-            cooldownFrames_ = std::max(cooldownFrames_, 2);
         }
 
         // === COOLDOWN (adaptive: exit early when FG settles) ===
@@ -771,6 +770,20 @@ public:
                 lastRawContours_ = (int)0;
                 return d;
             }
+        }
+
+        // Warp fgMask back to current frame coordinates for contour extraction
+        if (hasWarp) {
+            cv::Mat fgCurr;
+            cv::warpAffine(fgMask, fgCurr, lastAffine_, fgMask.size(),
+                           cv::INTER_NEAREST);
+            fgMask = fgCurr;
+            // Zero out edges (warp artifacts)
+            const int E = 4;
+            fgMask.rowRange(0, E).setTo(0);
+            fgMask.rowRange(fgMask.rows - E, fgMask.rows).setTo(0);
+            fgMask.colRange(0, E).setTo(0);
+            fgMask.colRange(fgMask.cols - E, fgMask.cols).setTo(0);
         }
 
         // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
@@ -900,6 +913,7 @@ private:
     cv::Mat kernel2_;
     cv::Mat kernel3_;
     cv::Mat prevGray_;    // uint8, for LK tracking
+    cv::Mat lastAffine_;  // prev→curr affine for motion compensation
     cv::Point2f lastValidCenter_;
     cv::Point2f prevValidCenter_;  // one before lastValidCenter_ for direction check
     int consecutiveDetections_;

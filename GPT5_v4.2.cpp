@@ -390,12 +390,17 @@ std::atomic<bool> scanEnabled(false);     // Scan mode OFF by default
 std::atomic<bool> scanActiveNow(false);   // True when scan is currently driving servos
 std::atomic<bool> trajectoryEnabled(true); // Trajectory drawing ON by default
 
-// === SERVO INTERPOLATION (100Hz smooth thread) ===
+// === DUAL-LOOP SERVO: 100Hz interpolation + inter-frame velocity prediction ===
+// Outer loop (tracking ~17Hz): detection → PD → publishes target + velocity
+// Inner loop (servo 100Hz): extrapolates target along velocity between detections
 std::atomic<double> servoTargetYaw(90.0);
 std::atomic<double> servoTargetPitch(90.0);
-std::atomic<bool>   servoInstantSnap(false); // true = skip interpolation, jump immediately
-std::atomic<double> servoActualYaw(90.0);   // actual interpolated position (for soft shutdown)
+std::atomic<bool>   servoInstantSnap(false);
+std::atomic<double> servoActualYaw(90.0);
 std::atomic<double> servoActualPitch(90.0);
+std::atomic<double> servoVelYaw(0.0);     // object velocity in servo deg/s
+std::atomic<double> servoVelPitch(0.0);
+std::atomic<double> servoUpdateTime(0.0); // steady_clock seconds when target was last set
 
 /* =============== PWM CONTROL FUNCTIONS =============== */
 
@@ -1215,24 +1220,44 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     cap.release();
 }
 
-/* =============== SERVO INTERPOLATION THREAD (100Hz) =============== */
+/* =============== DUAL-LOOP SERVO THREAD (100Hz) =============== */
+// Inner loop: between detections (~60ms gap at 17fps), extrapolates
+// servo target along object velocity — servo tracks continuously,
+// not just when a new frame arrives.
 
 void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.5;  // smoothing factor per 10ms step (fast response)
+    const double ALPHA = 0.5;
 
     while (run.load()) {
-        double targetYaw   = servoTargetYaw.load();
-        double targetPitch = servoTargetPitch.load();
+        double baseYaw   = servoTargetYaw.load();
+        double basePitch = servoTargetPitch.load();
 
         if (servoInstantSnap.exchange(false)) {
-            // Snap immediately (used by FIXED mode reset)
-            currentYaw   = targetYaw;
-            currentPitch = targetPitch;
+            currentYaw   = baseYaw;
+            currentPitch = basePitch;
         } else {
-            // Exponential interpolation toward target
+            // Inter-frame velocity prediction:
+            // Between detections, advance target along object velocity vector.
+            // This is the "inner loop" — fills the 60ms gap between frames.
+            double tUpdate = servoUpdateTime.load();
+            double now = std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
+            double dt = now - tUpdate;
+
+            double targetYaw   = baseYaw;
+            double targetPitch = basePitch;
+
+            // Predict only for 0..0.10s after last detection (< 2 frames)
+            if (dt > 0.005 && dt < 0.10 && tUpdate > 0.0) {
+                targetYaw   += servoVelYaw.load()   * dt;
+                targetPitch += servoVelPitch.load()  * dt;
+                targetYaw   = std::clamp(targetYaw,   5.0, 175.0);
+                targetPitch = std::clamp(targetPitch, 5.0, 175.0);
+            }
+
             currentYaw   += ALPHA * (targetYaw   - currentYaw);
             currentPitch += ALPHA * (targetPitch - currentPitch);
         }
@@ -1240,7 +1265,6 @@ void servoThread(std::atomic<bool>& run)
         setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(currentYaw));
         setServoAngle(PWM_CHANNEL_VERTICAL,   static_cast<float>(currentPitch));
 
-        // Publish actual position for soft shutdown monitoring
         servoActualYaw.store(currentYaw);
         servoActualPitch.store(currentPitch);
 
@@ -1524,6 +1548,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             servoTargetPitch.store(pitchDeg);
             lastSentYawDeg = yawDeg;
             lastSentPitchDeg = pitchDeg;
+
+            // Publish velocity for 100Hz inter-frame prediction (dual-loop inner loop)
+            if (hasVelocity) {
+                servoVelYaw.store(-vx * DEG_PER_PX);   // negative: object moves right → servo goes left
+                servoVelPitch.store(-vy * DEG_PER_PX);
+            } else {
+                servoVelYaw.store(0.0);
+                servoVelPitch.store(0.0);
+            }
+            servoUpdateTime.store(std::chrono::duration<double>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
 
             // Без settle: OF компенсирует движение камеры
         }

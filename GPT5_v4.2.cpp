@@ -1507,8 +1507,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double dist = std::sqrt(ex * ex + ey * ey);
 
-            // P: stronger now that dual-loop smooths servo motion
-            double Kp = DEG_PER_PX * 1.5;
+            // Moderate P: proportional zone extends to ~187px before clamp
+            double Kp = DEG_PER_PX * 1.0;
             if (dist < 15.0) Kp *= (0.3 + 0.7 * dist / 15.0);
 
             // Strong D-term: velocity matching + overshoot damping
@@ -1523,8 +1523,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew limit: 5° — dual-loop makes motion smoother for MOG2
-            const double MAX_STEP_DEG = 5.0;
+            // Slew limit: 4° = 68°/s at 17fps. Enough for circle tracking,
+            // low enough to not break MOG2 background model
+            const double MAX_STEP_DEG = 4.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

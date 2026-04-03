@@ -1454,11 +1454,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     vx = (x1 - x0) / dt;
                     vy = (y1 - y0) / dt;
                     hasVelocity = true;
-                    const double LEAD_TIME = 0.18; // predict 180ms ahead (60ms capture + 60ms process + 60ms servo)
+                    const double LEAD_TIME = 0.15; // predict 150ms ahead (capture + process + servo delay)
                     double leadX = vx * LEAD_TIME;
                     double leadY = vy * LEAD_TIME;
-                    // Clamp lead to ±120px: fast circular motion needs more room
-                    const double MAX_LEAD = 120.0;
+                    // Clamp lead to ±100px
+                    const double MAX_LEAD = 100.0;
                     if (leadX > MAX_LEAD) leadX = MAX_LEAD;
                     if (leadX < -MAX_LEAD) leadX = -MAX_LEAD;
                     if (leadY > MAX_LEAD) leadY = MAX_LEAD;
@@ -1505,7 +1505,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 ffPitch = vy * DEG_PER_PX * dtFrame;
             }
 
-            // Error derivative for conventional D-term
+            // Error derivative for damping
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
             double Kd = 0.002;
@@ -1513,25 +1513,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double stepYaw   = Kp * ex + Kd * dex + ffYaw;
             double stepPitch = Kp * ey + Kd * dey + ffPitch;
 
-            // FLOW DAMPING: subtract current camera velocity (in deg) from command
-            // Optical flow = camera motion in px/frame. If servo already moving
-            // in the right direction, this reduces the command → prevents overshoot.
-            cv::Point2f gf = detector.lastGlobalFlow();
-            double camVelYaw   = gf.x * DEG_PER_PX;  // current camera speed in deg
-            double camVelPitch = gf.y * DEG_PER_PX;
-            stepYaw   -= camVelYaw   * 0.7;  // 70% damping
-            stepPitch -= camVelPitch * 0.7;
-
             prevEx = ex;
             prevEy = ey;
             prevTime = nowTime;
 
-            // High slew limit — flow damping prevents runaway
-            const double MAX_STEP_DEG = 5.0;
-            if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
-            if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
-            if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
-            if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
+            // Adaptive slew limit: tight near center, loose far
+            double maxStep = std::min(5.0, 1.5 + dist * 0.02);
+            if (stepYaw >  maxStep) stepYaw =  maxStep;
+            if (stepYaw < -maxStep) stepYaw = -maxStep;
+            if (stepPitch >  maxStep) stepPitch =  maxStep;
+            if (stepPitch < -maxStep) stepPitch = -maxStep;
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

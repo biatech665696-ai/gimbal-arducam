@@ -1507,13 +1507,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double dist = std::sqrt(ex * ex + ey * ey);
 
-            // P: 1.2x — clips at ~156px, good balance
-            double Kp = DEG_PER_PX * 1.2;
+            // Moderate P: proportional zone extends to ~187px before clamp
+            double Kp = DEG_PER_PX * 1.0;
             if (dist < 15.0) Kp *= (0.3 + 0.7 * dist / 15.0);
 
-            // Mild D-term: damp near target, don't fight direction changes
-            // (was 0.008 but D dominated P by 3x → delayed direction reversal)
-            double Kd = 0.003;
+            // Strong D-term: velocity matching + overshoot damping
+            double Kd = 0.008;
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 

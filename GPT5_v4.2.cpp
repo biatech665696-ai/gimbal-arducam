@@ -1221,7 +1221,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.8;  // high alpha = minimal lag (was 0.5 → ~20ms extra delay)
+    const double ALPHA = 0.5;  // 0.8 caused overshoot — back to stable value
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1446,7 +1446,27 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Require 3+ points for reliable velocity (2 points too noisy)
             double vx = 0, vy = 0;
             bool hasVelocity = false;
-            if (velHistory.size() >= 3) {
+            double ax = 0, ay = 0;  // acceleration estimate
+            if (velHistory.size() >= 4) {
+                // Split history into two halves to estimate velocity at two points → acceleration
+                size_t mid = velHistory.size() / 2;
+                auto& [t0, x0, y0] = velHistory.front();
+                auto& [tm, xm, ym] = velHistory[mid];
+                auto& [t1, x1, y1] = velHistory.back();
+                double dt1 = tm - t0;
+                double dt2 = t1 - tm;
+                if (dt1 > 0.02 && dt2 > 0.02 && (dt1 + dt2) < 2.0) {
+                    double vx1 = (xm - x0) / dt1;
+                    double vy1 = (ym - y0) / dt1;
+                    double vx2 = (x1 - xm) / dt2;
+                    double vy2 = (y1 - ym) / dt2;
+                    vx = vx2;
+                    vy = vy2;
+                    ax = (vx2 - vx1) / ((dt1 + dt2) * 0.5);
+                    ay = (vy2 - vy1) / ((dt1 + dt2) * 0.5);
+                    hasVelocity = true;
+                }
+            } else if (velHistory.size() >= 3) {
                 auto& [t0, x0, y0] = velHistory.front();
                 auto& [t1, x1, y1] = velHistory.back();
                 double dt = t1 - t0;
@@ -1454,8 +1474,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     vx = (x1 - x0) / dt;
                     vy = (y1 - y0) / dt;
                     hasVelocity = true;
-                    // No lead prediction — hurts circular motion (tangential overshoot)
                 }
+            }
+
+            // 2nd-order lead prediction: velocity + acceleration (curves with the object)
+            // Linear lead failed for circles (tangential). Quadratic follows the arc.
+            const double LEAD = 0.06; // seconds ahead (~1 frame)
+            if (hasVelocity) {
+                ex += vx * LEAD + 0.5 * ax * LEAD * LEAD;
+                ey += vy * LEAD + 0.5 * ay * LEAD * LEAD;
             }
 
             // Save velocity for coast mode
@@ -1509,8 +1536,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
             if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
 
-            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f P=(%.2f,%.2f) D=(%.2f,%.2f) step=(%.2f,%.2f)\n",
-                    ex, ey, dist, Kp*ex, Kp*ey, Kd*filtDex, Kd*filtDey, stepYaw, stepPitch);
+            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f lead=(%.0f,%.0f) step=(%.2f,%.2f)\n",
+                    ex, ey, dist, vx*LEAD+0.5*ax*LEAD*LEAD, vy*LEAD+0.5*ay*LEAD*LEAD, stepYaw, stepPitch);
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

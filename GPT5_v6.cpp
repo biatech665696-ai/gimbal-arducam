@@ -879,35 +879,12 @@ public:
                            cv::BORDER_CONSTANT, cv::Scalar(0));
         }
 
-        // TWO-PASS MOG2: separate detection from learning.
-        // Pass 1: detect foreground (lr=0, no model update)
-        // Pass 2: learn background with object bbox masked out (prevents absorption)
+        // Single-pass MOG2: detect + learn in model space.
+        // Background stationary in model space → learned normally.
+        // Object moves in model space (camera tracked it) → stays foreground.
         cv::Mat fgMask;
-        mog2_->apply(detectFrame, fgMask, 0);  // detect only, don't learn
+        mog2_->apply(detectFrame, fgMask, lr);
         cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
-
-        // Pass 2: learn background, but mask out last known object position
-        // so MOG2 never sees the object as "background"
-        if (!isFrozen) {
-            cv::Mat learnFrame = detectFrame.clone();
-            if (lastObjectRect_.width > 0 && lastObjectRect_.height > 0) {
-                // Expand bbox by 50% to cover motion blur / slight misalignment
-                int ex = lastObjectRect_.width / 2;
-                int ey = lastObjectRect_.height / 2;
-                cv::Rect expanded(
-                    std::max(0, lastObjectRect_.x - ex),
-                    std::max(0, lastObjectRect_.y - ey),
-                    std::min(learnFrame.cols - std::max(0, lastObjectRect_.x - ex),
-                             lastObjectRect_.width + 2 * ex),
-                    std::min(learnFrame.rows - std::max(0, lastObjectRect_.y - ey),
-                             lastObjectRect_.height + 2 * ey));
-                // Fill with local mean so MOG2 sees "background" in that area
-                cv::Scalar mean = cv::mean(learnFrame);
-                learnFrame(expanded) = mean;
-            }
-            cv::Mat dummy;
-            mog2_->apply(learnFrame, dummy, lr);  // learn only
-        }
 
         int rawFG = cv::countNonZero(fgMask);
         lastFGPixels_ = rawFG;
@@ -1049,7 +1026,6 @@ public:
                 d.valid = true;
                 prevValidCenter_ = lastValidCenter_;
                 lastValidCenter_ = currentCenter;
-                lastObjectRect_ = bbox;  // save for MOG2 masking next frame
                 consecutiveDetections_++;
                 consecutiveMisses_ = 0;
             }

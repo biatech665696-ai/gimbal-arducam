@@ -1471,16 +1471,33 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Lead correction: predict where object will be after detection delay
             // Require 3+ points for reliable velocity (2 points too noisy)
+            // Velocity from last 2 points (instantaneous, not averaged)
+            // Acceleration from comparing recent vs older velocity
             double vx = 0, vy = 0;  // world velocity in deg/s
+            double ax = 0, ay = 0;  // world acceleration in deg/s²
             bool hasVelocity = false;
-            if (velHistory.size() >= 3) {
-                auto& [t0, x0, y0] = velHistory.front();
-                auto& [t1, x1, y1] = velHistory.back();
+            int n = velHistory.size();
+            if (n >= 2) {
+                auto& [t0, x0, y0] = velHistory[n-2];
+                auto& [t1, x1, y1] = velHistory[n-1];
                 double dt = t1 - t0;
-                if (dt > 0.05 && dt < 2.0) {
-                    vx = (x1 - x0) / dt;  // now in deg/s (world coords)
+                if (dt > 0.01 && dt < 1.0) {
+                    vx = (x1 - x0) / dt;
                     vy = (y1 - y0) / dt;
                     hasVelocity = true;
+                }
+                // Acceleration: compare current velocity to older velocity
+                if (n >= 4) {
+                    auto& [ta, xa, ya] = velHistory[n-4];
+                    auto& [tb, xb, yb] = velHistory[n-3];
+                    double dta = tb - ta;
+                    double dtv = t1 - tb;
+                    if (dta > 0.01 && dtv > 0.02) {
+                        double vx_old = (xb - xa) / dta;
+                        double vy_old = (yb - ya) / dta;
+                        ax = (vx - vx_old) / dtv;
+                        ay = (vy - vy_old) / dtv;
+                    }
                 }
             }
 
@@ -1518,10 +1535,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
-            // Feedforward from world velocity (deg/s → deg/frame)
+            // Feedforward: velocity + acceleration (compensate for lag on accel/decel)
             double FF = 1.0;
-            double ffYaw   = hasVelocity ? FF * vx * dt : 0.0;  // vx already in deg/s
-            double ffPitch = hasVelocity ? FF * vy * dt : 0.0;
+            double FA = 0.3;  // acceleration feedforward gain
+            double ffYaw   = hasVelocity ? FF * vx * dt + FA * ax * dt * dt : 0.0;
+            double ffPitch = hasVelocity ? FF * vy * dt + FA * ay * dt * dt : 0.0;
 
             double stepYaw   = Kp * ex + Kd * dex + ffYaw;
             double stepPitch = Kp * ey + Kd * dey + ffPitch;

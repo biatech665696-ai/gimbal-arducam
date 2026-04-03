@@ -284,7 +284,7 @@ static void* handleHttpClient(void* arg) {
         }
 
         std::vector<uchar> jpg;
-        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 60};
         if (!cv::imencode(".jpg", frame, jpg, params) || jpg.empty()) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
@@ -777,7 +777,7 @@ public:
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
-        cv::findContours(fgMask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        cv::findContours(fgMask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
         lastFGPixels_ = cv::countNonZero(fgMask);
         lastRawContours_ = (int)contours.size();
@@ -1750,10 +1750,14 @@ int main()
             
             if (!frame.empty()) {
                 cv::imshow("Predictive Gimbal Control", frame);
-                // Update HTTP MJPEG stream frame
+                // Update HTTP MJPEG stream frame (resize OUTSIDE mutex to avoid blocking)
                 if (streamRunning) {
-                    std::lock_guard<std::mutex> lock(streamMutex);
-                    cv::resize(frame, streamFrame, cv::Size(1600, 900));
+                    cv::Mat tempResized;
+                    cv::resize(frame, tempResized, cv::Size(1600, 900));
+                    {
+                        std::lock_guard<std::mutex> lock(streamMutex);
+                        streamFrame = tempResized;
+                    }
                 }
             }
         }

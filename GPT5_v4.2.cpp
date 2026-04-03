@@ -1495,23 +1495,34 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double stepYaw   = Kp * ex + Kd * dex;
             double stepPitch = Kp * ey + Kd * dey;
 
-            // DIAG: see actual control values
-            double rawStepY = stepYaw, rawStepP = stepPitch;
-
             prevEx = ex;
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew rate limiter — high limit needed for fast objects
-            // Safe because coast section uses only 1.0° max
-            const double MAX_STEP_DEG = 7.0;
-            if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
-            if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
-            if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
-            if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
+            // Adaptive slew limit: gentle near target, aggressive far away
+            // dist< 30px → 2.0°   (fine tracking)
+            // dist>=200px → 7.0°  (full speed catch-up)
+            double maxStep = 2.0 + 5.0 * std::min(dist / 200.0, 1.0);
+            if (stepYaw >  maxStep) stepYaw =  maxStep;
+            if (stepYaw < -maxStep) stepYaw = -maxStep;
+            if (stepPitch >  maxStep) stepPitch =  maxStep;
+            if (stepPitch < -maxStep) stepPitch = -maxStep;
 
-            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f raw=(%.2f,%.2f) clamp=(%.2f,%.2f) Kp=%.4f dt=%.3f\n",
-                    ex, ey, dist, rawStepY, rawStepP, stepYaw, stepPitch, Kp, dt);
+            // Acceleration limiter: prevent instant direction reversal
+            // Max change in step per frame = 3° — forces smooth ramp up/down
+            static double prevStepY = 0.0, prevStepP = 0.0;
+            const double MAX_ACCEL = 3.0;
+            double dY = stepYaw - prevStepY;
+            double dP = stepPitch - prevStepP;
+            if (dY >  MAX_ACCEL) stepYaw   = prevStepY + MAX_ACCEL;
+            if (dY < -MAX_ACCEL) stepYaw   = prevStepY - MAX_ACCEL;
+            if (dP >  MAX_ACCEL) stepPitch = prevStepP + MAX_ACCEL;
+            if (dP < -MAX_ACCEL) stepPitch = prevStepP - MAX_ACCEL;
+            prevStepY = stepYaw;
+            prevStepP = stepPitch;
+
+            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f maxS=%.1f step=(%.2f,%.2f)\n",
+                    ex, ey, dist, maxStep, stepYaw, stepPitch);
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

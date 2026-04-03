@@ -822,6 +822,8 @@ public:
             modelSpaceValid_ = false;
         }
 
+        // Save previous gray for frame-diff BEFORE updating prevGray_
+        cv::Mat savedPrevGray = prevGray_.clone();
         prevGray_ = gray.clone();
 
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
@@ -916,9 +918,9 @@ public:
         // === Mode B: Compensated frame-diff (fallback when MOG2 is broken) ===
         cv::Mat maskB;
         bool haveMaskB = false;
-        if (!lastAffine_.empty() && !prevGray_.empty() && prevGray_.size() == gray.size()) {
+        if (!lastAffine_.empty() && !savedPrevGray.empty() && savedPrevGray.size() == gray.size()) {
             cv::Mat warpedPrev;
-            cv::warpAffine(prevGray_, warpedPrev, lastAffine_, gray.size(),
+            cv::warpAffine(savedPrevGray, warpedPrev, lastAffine_, gray.size(),
                            cv::INTER_LINEAR, cv::BORDER_REFLECT_101);
             cv::absdiff(warpedPrev, gray, maskB);
             cv::threshold(maskB, maskB, 25, 255, cv::THRESH_BINARY);

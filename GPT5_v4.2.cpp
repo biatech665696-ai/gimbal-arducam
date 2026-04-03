@@ -1529,16 +1529,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew limit: 4° = 68°/s at 17fps. Enough for circle tracking,
-            // low enough to not break MOG2 background model
-            const double MAX_STEP_DEG = 4.0;
+            // Slew limit: 6° = 102°/s at 17fps
+            const double MAX_STEP_DEG = 6.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
             if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
 
-            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f P=(%.2f,%.2f) D=(%.2f,%.2f) step=(%.2f,%.2f)\n",
-                    ex, ey, dist, Kp*ex, Kp*ey, Kd*dex, Kd*dey, stepYaw, stepPitch);
+            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f P=(%.2f,%.2f) D=(%.2f,%.2f) FF=(%.2f,%.2f) step=(%.2f,%.2f)\n",
+                    ex, ey, dist, Kp*ex, Kp*ey, Kd*dex, Kd*dey, ffYaw, ffPitch, stepYaw, stepPitch);
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

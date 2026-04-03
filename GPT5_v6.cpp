@@ -972,7 +972,7 @@ public:
             }
 
             if (!atEdge &&
-                area >= 2.0 && area <= 1500.0 &&
+                area >= 1.0 && area <= 1500.0 &&
                 solidity > 0.15 &&
                 bbox.width >= 1 && bbox.height >= 1 &&
                 bbox.width <= 100 && bbox.height <= 100 &&

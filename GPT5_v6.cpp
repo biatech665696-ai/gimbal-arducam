@@ -732,7 +732,6 @@ public:
         cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
         modelSpaceValid_ = false;
         prevFgMask_ = cv::Mat();
-        lastAffine_ = cv::Mat();
     }
     void resetCounters()
     {
@@ -801,7 +800,6 @@ public:
                     cv::Mat affine = cv::estimateAffinePartial2D(
                         goodPrev, goodCurr, inlierMask, cv::RANSAC, 3.0);
                     if (!affine.empty()) {
-                        lastAffine_ = affine.clone();
                         lastGlobalFlow_ = cv::Point2f(
                             (float)affine.at<double>(0, 2),
                             (float)affine.at<double>(1, 2));
@@ -822,8 +820,6 @@ public:
             modelSpaceValid_ = false;
         }
 
-        // Save previous gray for frame-diff BEFORE updating prevGray_
-        cv::Mat savedPrevGray = prevGray_.clone();
         prevGray_ = gray.clone();
 
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
@@ -915,26 +911,6 @@ public:
             }
         }
 
-        // === Mode B: Compensated frame-diff (fallback when MOG2 is broken) ===
-        cv::Mat maskB;
-        bool haveMaskB = false;
-        if (!lastAffine_.empty() && !savedPrevGray.empty() && savedPrevGray.size() == gray.size()) {
-            cv::Mat warpedPrev;
-            cv::warpAffine(savedPrevGray, warpedPrev, lastAffine_, gray.size(),
-                           cv::INTER_LINEAR, cv::BORDER_REFLECT_101);
-            cv::absdiff(warpedPrev, gray, maskB);
-            cv::threshold(maskB, maskB, 25, 255, cv::THRESH_BINARY);
-
-            const int E = std::max(5, (int)std::ceil(flowMag) + 3);
-            if (E < maskB.rows / 2 && E < maskB.cols / 2) {
-                maskB.rowRange(0, E).setTo(0);
-                maskB.rowRange(maskB.rows - E, maskB.rows).setTo(0);
-                maskB.colRange(0, E).setTo(0);
-                maskB.colRange(maskB.cols - E, maskB.cols).setTo(0);
-            }
-            haveMaskB = true;
-        }
-
         // Edge mask + warp fgMask back to current frame coordinates
         if (modelSpaceValid_) {
             // Exclude model-space pixels outside current frame FOV
@@ -954,9 +930,6 @@ public:
             fgMask = fgCurr;
         }
 
-        // === PRIMARY: MOG2 detection ===
-        // (fgMask already contains motion-compensated MOG2 result)
-
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel2_);
 
         // Store fg mask (current-frame coords) for next frame's LK feature masking
@@ -967,19 +940,6 @@ public:
 
         lastFGPixels_ = cv::countNonZero(fgMask);
         lastRawContours_ = (int)contours.size();
-
-        // === FALLBACK: if MOG2 found nothing, try frame-diff ===
-        // Frame-diff sees any moving object regardless of background model state.
-        // Only used when MOG2 has zero valid contours (likely absorbed the object).
-        bool usedFrameDiff = false;
-        if (contours.empty() && haveMaskB) {
-            cv::morphologyEx(maskB, maskB, cv::MORPH_CLOSE, kernel2_);
-            contours.clear();
-            cv::findContours(maskB.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
-            lastRawContours_ = (int)contours.size();
-            // Don't update lastFGPixels_ — keep MOG2 value for FG_GATE downstream
-            usedFrameDiff = true;
-        }
 
         // === ФИЛЬТРАЦИЯ КОНТУРОВ ===
         // Determine search center: prefer external prediction, fallback to internal last position
@@ -1100,7 +1060,6 @@ private:
     cv::Mat cumulativeAffine_;  // 2x3: model space → current ROI space
     bool modelSpaceValid_;
     cv::Mat prevFgMask_;  // fg mask from previous frame (current-frame coords) for LK masking
-    cv::Mat lastAffine_;   // per-frame affine (prev→curr) for compensated frame-diff
 };
 
 /* =============== 2. MULTI-SCALE COARSE DETECTION =============== */

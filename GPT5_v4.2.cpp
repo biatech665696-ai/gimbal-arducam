@@ -1518,7 +1518,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Feedforward: add object velocity directly to servo command
             // so servo tracks speed, not just position error
-            double FF = 0.7;
+            double FF = 1.0;
             double ffYaw   = hasVelocity ? FF * vx * DEG_PER_PX : 0.0;
             double ffPitch = hasVelocity ? FF * vy * DEG_PER_PX : 0.0;
 

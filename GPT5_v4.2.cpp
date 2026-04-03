@@ -1221,7 +1221,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.25;  // smoothing factor per 10ms step
+    const double ALPHA = 0.7;  // smoothing factor per 10ms step (fast response)
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1491,7 +1491,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             // Adaptive Kp: softer near center, full strength far away
             double dist = std::sqrt(ex * ex + ey * ey);
-            double Kp = DEG_PER_PX * std::min(1.0, 0.3 + 0.7 * (dist / 200.0));
+            double Kp = DEG_PER_PX * std::min(1.0, 0.5 + 0.5 * (dist / 200.0));
             double Kd = 0.004;  // derivative gain (damps approach)
 
             double dex = (ex - prevEx) / dt;
@@ -1505,7 +1505,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevTime = nowTime;
 
             // Slew rate limiter: max degrees per frame (~20fps → 16°/s)
-            const double MAX_STEP_DEG = 0.8;
+            const double MAX_STEP_DEG = 4.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
@@ -1551,7 +1551,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double stepYaw   = Kp * ex;
                 double stepPitch = Kp * ey;
 
-                const double MAX_STEP_DEG = 0.8;
+                const double MAX_STEP_DEG = 4.0;
                 if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
                 if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
                 if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

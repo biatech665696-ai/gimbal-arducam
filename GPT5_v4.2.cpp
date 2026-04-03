@@ -1467,8 +1467,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             coastLastX = d.x;
             coastLastY = d.y;
 
-            // Clamp max error: >200px from center = likely false detection
-            const double MAX_ERR = 200.0;
+            // Clamp max error: >400px from center = likely false detection
+            const double MAX_ERR = 400.0;
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
@@ -1495,16 +1495,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double stepYaw   = Kp * ex + Kd * dex;
             double stepPitch = Kp * ey + Kd * dey;
 
+            // DIAG: see actual control values
+            double rawStepY = stepYaw, rawStepP = stepPitch;
+
             prevEx = ex;
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew rate limiter
-            const double MAX_STEP_DEG = 3.0;
+            // Slew rate limiter — high limit needed for fast objects
+            // Safe because coast section uses only 1.0° max
+            const double MAX_STEP_DEG = 7.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
             if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
+
+            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f raw=(%.2f,%.2f) clamp=(%.2f,%.2f) Kp=%.4f dt=%.3f\n",
+                    ex, ey, dist, rawStepY, rawStepP, stepYaw, stepPitch, Kp, dt);
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;

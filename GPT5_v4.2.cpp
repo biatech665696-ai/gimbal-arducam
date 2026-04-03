@@ -1270,9 +1270,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
 
         // === FRAME PREPARATION ===
-        cv::Mat display = f.frame.clone();
+        cv::Mat& display = f.frame;  // use directly, no clone needed (f is local copy from queue)
         cv::Mat resized;
-        cv::resize(f.frame, resized, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
+        cv::resize(display, resized, cv::Size(), 0.25, 0.25, cv::INTER_LINEAR);
         cv::Mat gray;
         cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
 
@@ -1548,13 +1548,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // Draw bright green rectangles around all detected moving objects with labels
         int objCounter = 0;
         for (const auto& box : d.all_boxes) {
-            cv::rectangle(display, box, cv::Scalar(0,255,0), 3);  // Thicker border
-            // Add semi-transparent fill
-            cv::Mat overlay = display.clone();
-            cv::rectangle(overlay, box, cv::Scalar(0,255,0), -1);
-            cv::addWeighted(overlay, 0.15, display, 0.85, 0, display);
+            cv::rectangle(display, box, cv::Scalar(0,255,0), 3);
+            // Lightweight tint: darken box region instead of full-frame clone+addWeighted
+            cv::Rect safeBox = box & cv::Rect(0, 0, display.cols, display.rows);
+            if (safeBox.area() > 0)
+                display(safeBox) *= 0.85;
             
-            // Label each object
             objCounter++;
             std::string label = "OBJ" + std::to_string(objCounter);
             cv::putText(display, label, cv::Point(box.x, box.y - 5), 
@@ -1655,10 +1654,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             int bx = display.cols - boxW - 10;
             int by = display.rows - boxH - 10;
 
-            cv::Mat overlay = display.clone();
-            cv::rectangle(overlay, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
+            // Opaque background (no full-frame clone needed)
+            cv::rectangle(display, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
                          cv::Scalar(0, 0, 0), -1);
-            cv::addWeighted(overlay, 0.6, display, 0.4, 0, display);
             cv::rectangle(display, cv::Point(bx, by), cv::Point(bx + boxW, by + boxH),
                          cv::Scalar(0, 255, 255), 2);
 

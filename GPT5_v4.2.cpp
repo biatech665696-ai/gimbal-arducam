@@ -1483,9 +1483,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
             // NON-LINEAR controller with velocity feedforward
-            // 1) Position term: soft near center, strong at edges (quadratic ramp)
-            //    Prevents overshoot near center while catching up at edges
-            // 2) Velocity feedforward: match object speed directly in deg/frame
+            // Position: strong everywhere, soft only very near center (< 20px)
+            // Velocity FF: match object speed to prevent lag
+            // High maxStep allowed because detection is valid — servo won't runaway
             static double prevEx = 0.0, prevEy = 0.0;
             static auto prevTime = std::chrono::steady_clock::now();
             auto nowTime = std::chrono::steady_clock::now();
@@ -1494,23 +1494,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double dist = std::sqrt(ex * ex + ey * ey);
 
-            // Position term: quadratic ramp — gentle near center, aggressive far
-            // At 10px: factor=0.5, at 50px: factor=0.54, at 100px: factor=0.67, at 200px: factor=1.0
-            double posFactor = std::min(1.0, 0.5 + 0.5 * (dist / 200.0) * (dist / 200.0));
-            double Kp = DEG_PER_PX * posFactor * 1.5;  // 1.5x base gain for faster catch-up
+            // Position term: full gain, soft only within 20px deadzone
+            double Kp = DEG_PER_PX * 2.0;
+            if (dist < 20.0) Kp *= (0.4 + 0.6 * dist / 20.0);
 
-            // Velocity feedforward: convert px/s velocity directly to deg/frame
+            // Velocity feedforward: 100% of object speed
             double ffYaw = 0.0, ffPitch = 0.0;
             if (hasVelocity) {
-                // vx, vy are in px/s at full resolution
-                // Convert to deg/frame: px/s * deg/px * dt_frame
-                double dtFrame = dt;  // time since last control update
-                ffYaw   = vx * DEG_PER_PX * dtFrame * 0.8;  // 80% of predicted velocity
-                ffPitch = vy * DEG_PER_PX * dtFrame * 0.8;
+                double dtFrame = dt;
+                ffYaw   = vx * DEG_PER_PX * dtFrame;
+                ffPitch = vy * DEG_PER_PX * dtFrame;
             }
 
-            // D-term: only for damping oscillation, not for speed
-            double Kd = 0.003;
+            double Kd = 0.002;
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
@@ -1521,8 +1517,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew rate limiter: max degrees per frame (~20fps → 16°/s)
-            const double MAX_STEP_DEG = 2.0;
+            // HIGH slew limit — safe because we have valid detection
+            // If detection is lost, coast section below uses much lower limit
+            const double MAX_STEP_DEG = 5.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
@@ -1546,29 +1543,34 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             // Без settle: OF компенсирует движение камеры
         }
         // === PREDICTIVE COAST: keep tracking by extrapolation when detection is lost ===
+        // LOW speed + fast decay — prevents runaway when detection is bad
         else if (!d.valid && currentTrackingEnabled && !scanActive) {
             auto now = std::chrono::steady_clock::now();
             double sinceLastDetect = std::chrono::duration<double>(now - coastLastDetectTime).count();
-            const double COAST_MAX_SEC = 0.8; // coast for up to 800ms
+            const double COAST_MAX_SEC = 0.3; // short coast — stop quickly if lost
 
             if (sinceLastDetect < COAST_MAX_SEC && sinceLastDetect > 0.02 &&
                 (std::abs(coastVx) > 5.0 || std::abs(coastVy) > 5.0)) {
-                // Extrapolate object position from last detection + velocity
+                // Decay factor: coast gets weaker over time (1.0 → 0.0)
+                double decay = 1.0 - sinceLastDetect / COAST_MAX_SEC;
+                decay = decay * decay;  // quadratic decay — stops fast
+
                 double predX = coastLastX + coastVx * sinceLastDetect;
                 double predY = coastLastY + coastVy * sinceLastDetect;
 
                 double ex = predX - cx;
                 double ey = predY - cy;
 
-                const double MAX_ERR = 300.0;
+                const double MAX_ERR = 200.0;
                 if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
                 if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-                double Kp = DEG_PER_PX * 0.7; // slightly conservative during coast
+                double Kp = DEG_PER_PX * 0.5 * decay;
                 double stepYaw   = Kp * ex;
                 double stepPitch = Kp * ey;
 
-                const double MAX_STEP_DEG = 2.0;
+                // LOW slew limit during coast — prevent runaway
+                const double MAX_STEP_DEG = 1.0;
                 if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
                 if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
                 if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

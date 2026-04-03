@@ -611,7 +611,7 @@ class MotionDetector
 {
 public:
     MotionDetector()
-        : mog2_(cv::createBackgroundSubtractorMOG2(500, 30.0, false))
+        : mog2_(cv::createBackgroundSubtractorMOG2(500, 16.0, false))
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
         , lastValidCenter_(-1, -1)
@@ -621,10 +621,11 @@ public:
         , lastFGPixels_(0)
         , lastRawContours_(0)
         , lastGlobalFlow_(0, 0)
-        , warmupFrames_(50)
-        , modelSpaceValid_(false)
+        , framesSinceMotion_(999)
+        , prevRawFG_(0)
+        , cooldownFrames_(0)
+        , postCooldownLR_(0)
     {
-        cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
         mog2_->setBackgroundRatio(0.9);
@@ -635,14 +636,14 @@ public:
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
     void reinitBGS() {
-        mog2_ = cv::createBackgroundSubtractorMOG2(500, 30.0, false);
+        mog2_ = cv::createBackgroundSubtractorMOG2(500, 16.0, false);
         mog2_->setNMixtures(5);
         mog2_->setComplexityReductionThreshold(0.05);
         mog2_->setBackgroundRatio(0.9);
         prevGray_ = cv::Mat();
-        warmupFrames_ = 50;
-        cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
-        modelSpaceValid_ = false;
+        prevRawFG_ = 0;
+        cooldownFrames_ = 0;
+        postCooldownLR_ = 0;
     }
     void resetCounters()
     {
@@ -656,7 +657,7 @@ public:
     Detection detect(cv::Mat &roi, int ox, int oy, double /*learningRate*/ = 0.0)
     {
         const int MIN_DETECTIONS = 1;
-        const int MAX_MISSES = 15;
+        const int MAX_MISSES = 60;
 
         Detection d;
         d.valid = false;
@@ -667,7 +668,7 @@ public:
         else
             gray = roi.clone();
 
-        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 1.2);
+        cv::GaussianBlur(gray, gray, cv::Size(3, 3), 0.8);
 
         // === CAMERA MOTION ESTIMATION (sparse LK + affine) ===
         lastGlobalFlow_ = cv::Point2f(0, 0);
@@ -699,21 +700,9 @@ public:
                         lastGlobalFlow_ = cv::Point2f(
                             (float)affine.at<double>(0, 2),
                             (float)affine.at<double>(1, 2));
-                        // Accumulate affine: model → prev → curr
-                        cv::Mat A3 = cv::Mat::eye(3, 3, CV_64F);
-                        affine.copyTo(A3(cv::Rect(0, 0, 3, 2)));
-                        cv::Mat C3 = cv::Mat::eye(3, 3, CV_64F);
-                        cumulativeAffine_.copyTo(C3(cv::Rect(0, 0, 3, 2)));
-                        cv::Mat R = A3 * C3;
-                        cumulativeAffine_ = R(cv::Rect(0, 0, 3, 2)).clone();
-                        modelSpaceValid_ = true;
                     }
                 }
             }
-        } else if (!prevGray_.empty()) {
-            // ROI size changed — reset motion compensation
-            cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
-            modelSpaceValid_ = false;
         }
 
         prevGray_ = gray.clone();
@@ -721,72 +710,70 @@ public:
         float flowMag = std::sqrt(lastGlobalFlow_.x * lastGlobalFlow_.x +
                                    lastGlobalFlow_.y * lastGlobalFlow_.y);
 
-        // === MOTION-COMPENSATED MOG2 DETECTION ===
-        // Warp frame to model space where background is stationary.
-        // Camera motion = uniform shift → background. Only non-uniform motion = foreground.
-        float cumTx = modelSpaceValid_ ? (float)cumulativeAffine_.at<double>(0, 2) : 0.0f;
-        float cumTy = modelSpaceValid_ ? (float)cumulativeAffine_.at<double>(1, 2) : 0.0f;
-        float cumShift = std::sqrt(cumTx * cumTx + cumTy * cumTy);
-
-        // Soft reset when model space drifted too far:
-        // Keep MOG2 model (don't destroy background knowledge!)
-        // Just reset affine to identity + short warmup for adaptation
-        if (cumShift > 300.0f) {
-            cumulativeAffine_ = (cv::Mat_<double>(2,3) << 1, 0, 0, 0, 1, 0);
-            modelSpaceValid_ = false;
-            warmupFrames_ = 5; // brief adaptation, not full relearn
-            prevGray_ = gray.clone();
-        }
-
+        // === ADAPTIVE MOG2 LEARNING RATE ===
+        // Camera moving → high LR: absorb new background in 1-2 frames
+        // Auto-exposure spike (high fg, no flow) → medium LR to absorb brightness shift
+        // Camera stable → low LR: object stays foreground for detection
         double lr;
-        if (warmupFrames_ > 0) {
-            lr = 0.5;
-            warmupFrames_--;
+        if (flowMag > 2.0f) {
+            lr = 0.5;               // Camera motion: fast absorb new bg
+            framesSinceMotion_ = 0;
+        } else if (prevRawFG_ > 5000 && flowMag < 1.0f) {
+            lr = 0.3;               // Auto-exposure spike: absorb brightness change
+        } else if (framesSinceMotion_ < 3) {
+            lr = 0.2;               // Post-motion transition
+            framesSinceMotion_++;
         } else {
-            lr = 0.003;
+            lr = 0.008;             // Stable: moderate learning (trail absorbed ~7s)
+            if (postCooldownLR_ > 0) {
+                lr = 0.08;           // Post-cooldown: absorb residuals faster
+                postCooldownLR_--;
+            }
         }
 
-        // Warp current frame to model space (background stationary)
-        cv::Mat detectFrame = gray;
-        if (modelSpaceValid_) {
-            cv::warpAffine(gray, detectFrame, cumulativeAffine_, gray.size(),
-                           cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
-                           cv::BORDER_CONSTANT, cv::Scalar(0));
-        }
-
-        // Single-pass MOG2: detect + learn in model space
+        // === MOG2 FOREGROUND DETECTION ===
         cv::Mat fgMask;
-        mog2_->apply(detectFrame, fgMask, lr);
+        mog2_->apply(gray, fgMask, lr);
+
+        // Remove shadows (MOG2 marks as 127 when detectShadows=true)
         cv::threshold(fgMask, fgMask, 200, 255, cv::THRESH_BINARY);
 
         int rawFG = cv::countNonZero(fgMask);
         lastFGPixels_ = rawFG;
+        prevRawFG_ = rawFG;
 
-        // Catastrophic FG = total scene change, skip
-        if (rawFG > 80000) {
+        // === FG PIXEL GATE ===
+        // High fg = camera shift noise. Reset consecutive to prevent
+        // noise carry-over to first clean frame.
+        if (rawFG > 2000) {
             lastRawContours_ = 0;
+            consecutiveDetections_ = 0;
+            cooldownFrames_ = 2;  // require 2 clean frames after noise (adaptive exit)
             return d;
         }
 
-        // Edge mask + warp fgMask back to current frame coordinates
-        if (modelSpaceValid_) {
-            // Exclude model-space pixels outside current frame FOV
-            cv::Mat ones(gray.size(), CV_8UC1, cv::Scalar(255));
-            cv::Mat edgeMask;
-            cv::warpAffine(ones, edgeMask, cumulativeAffine_, gray.size(),
-                           cv::INTER_LINEAR | cv::WARP_INVERSE_MAP,
-                           cv::BORDER_CONSTANT, cv::Scalar(0));
-            cv::threshold(edgeMask, edgeMask, 200, 255, cv::THRESH_BINARY);
-            cv::erode(edgeMask, edgeMask, kernel3_);
-            fgMask &= edgeMask;
-
-            // Transform foreground mask from model space to current frame
-            cv::Mat fgCurr;
-            cv::warpAffine(fgMask, fgCurr, cumulativeAffine_, gray.size(),
-                           cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0));
-            fgMask = fgCurr;
+        // === OF VALIDATION ===
+        // Camera still moving (flow>1.0) but FG below gate → residual noise
+        if (flowMag > 1.0f) {
+            consecutiveDetections_ = 0;
+            cooldownFrames_ = std::max(cooldownFrames_, 2);
         }
 
+        // === COOLDOWN (adaptive: exit early when FG settles) ===
+        if (cooldownFrames_ > 0) {
+            if (rawFG < 300 && flowMag < 0.5f) {
+                cooldownFrames_ = 0;  // FG settled, end cooldown early
+                postCooldownLR_ = 3;  // boost LR to absorb residuals
+                // Don't reset consecutive — scene is clean, allow immediate detection
+            } else {
+                cooldownFrames_--;
+                consecutiveDetections_ = 0;
+                lastRawContours_ = (int)0;
+                return d;
+            }
+        }
+
+        // Morphology: skip OPEN (would erode tiny object), CLOSE connects nearby
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
 
         std::vector<std::vector<cv::Point>> contours;
@@ -796,9 +783,6 @@ public:
         lastRawContours_ = (int)contours.size();
 
         // === ФИЛЬТРАЦИЯ КОНТУРОВ ===
-        // Spatial proximity gate: when we know where the object is, ignore far-away noise
-        bool hasSpatialRef = (lastValidCenter_.x >= 0);
-        const float SEARCH_RADIUS = 100.0f; // pixels at 0.25x scale
         std::vector<std::pair<double, int>> validObjects;
 
         for (size_t i = 0; i < contours.size(); i++) {
@@ -812,15 +796,6 @@ public:
             bool atEdge = (bbox.x <= EDGE_MARGIN || bbox.y <= EDGE_MARGIN ||
                           bbox.x + bbox.width >= roi.cols - EDGE_MARGIN ||
                           bbox.y + bbox.height >= roi.rows - EDGE_MARGIN);
-
-            // Spatial gate: skip contours far from last known position
-            if (hasSpatialRef) {
-                float cx_ = bbox.x + bbox.width * 0.5f;
-                float cy_ = bbox.y + bbox.height * 0.5f;
-                float dist = std::sqrt((cx_ - lastValidCenter_.x) * (cx_ - lastValidCenter_.x)
-                                     + (cy_ - lastValidCenter_.y) * (cy_ - lastValidCenter_.y));
-                if (dist > SEARCH_RADIUS) continue;
-            }
 
             if (!atEdge &&
                 area >= 3.0 && area <= 1500.0 &&
@@ -932,9 +907,10 @@ private:
     int lastFGPixels_;
     int lastRawContours_;
     cv::Point2f lastGlobalFlow_;
-    int warmupFrames_;             // frames of high LR after reinit
-    cv::Mat cumulativeAffine_;     // model-to-current affine transform
-    bool modelSpaceValid_;         // true after first successful affine estimation
+    int framesSinceMotion_;
+    int prevRawFG_;
+    int cooldownFrames_;  // frames since last FG gate/noise gate
+    int postCooldownLR_;  // frames of elevated LR after cooldown ends
 };
 
 /* =============== ROI COMPUTATION =============== */
@@ -1201,7 +1177,7 @@ void servoThread(std::atomic<bool>& run)
 {
     double currentYaw   = servoTargetYaw.load();
     double currentPitch = servoTargetPitch.load();
-    const double ALPHA = 0.6;  // smoothing factor per 10ms step (reach ~97% in 50ms)
+    const double ALPHA = 0.5;   // smoothing factor per 10ms step (faster tracking)
 
     while (run.load()) {
         double targetYaw   = servoTargetYaw.load();
@@ -1303,34 +1279,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // === DETECTION (каждый кадр, без settle) ===
         Detection d = detector.detect(gray, 0, 0);
 
-        // === PER-FRAME DIAGNOSTIC LOG ===
-        int fgPx = detector.lastFGPixels();
-        int rawCnt = detector.lastRawContours();
-        int objCount = (int)d.all_boxes.size();
-        const char* rejectReason = nullptr;
-
-        // Diagnostic labels only — no blocking gates.
-        // Spatial proximity gate inside detect() already filters noise.
-        if (!d.valid && fgPx > 2000) {
-            rejectReason = "FG_HI";
+        // Noise gate: >5 объектов после фильтрации = шум MOG2
+        if ((int)d.all_boxes.size() > 5) {
+            d.valid = false;
+            d.all_boxes.clear();
+            detector.resetConsecutive();
         }
-        if (!rejectReason && !d.valid) {
-            rejectReason = "NO_CONTOUR";
-        }
-
-        static int diagFrame = 0;
-        diagFrame++;
-        float flow = std::sqrt(detector.lastGlobalFlow().x * detector.lastGlobalFlow().x +
-                               detector.lastGlobalFlow().y * detector.lastGlobalFlow().y);
-        std::cout << "[F" << diagFrame << "] "
-                  << (d.valid ? "DET" : "---")
-                  << " fg=" << fgPx
-                  << " cnt=" << rawCnt
-                  << " obj=" << objCount
-                  << " flow=" << std::fixed << std::setprecision(1) << flow;
-        if (rejectReason) std::cout << " REJ=" << rejectReason;
-        if (d.valid) std::cout << " pos=(" << (int)(d.x*4) << "," << (int)(d.y*4) << ")";
-        std::cout << std::endl;
 
         // Scale → full-res
         if (d.valid) {
@@ -1462,8 +1416,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 }
             }
 
-            // Clamp max error: >600px from center = likely false detection
-            const double MAX_ERR = 600.0;
+            // Clamp max error: >200px from center = likely false detection
+            const double MAX_ERR = 200.0;
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
@@ -1474,9 +1428,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double dt = std::chrono::duration<double>(nowTime - prevTime).count();
             if (dt < 0.001) dt = 0.001; // safety clamp
 
-            // Direct proportional + derivative control
-            double Kp = DEG_PER_PX;
-            double Kd = 0.003;  // derivative gain (damps approach)
+            // Adaptive Kp: softer near center, full strength far away
+            double dist = std::sqrt(ex * ex + ey * ey);
+            double Kp = DEG_PER_PX * std::min(1.0, 0.3 + 0.7 * (dist / 200.0));
+            double Kd = 0.004;  // derivative gain (damps approach)
 
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
@@ -1488,8 +1443,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Slew rate limiter: max degrees per frame (~20fps → 80°/s)
-            const double MAX_STEP_DEG = 4.0;
+            // Slew rate limiter: max degrees per frame (~20fps → 40°/s)
+            const double MAX_STEP_DEG = 2.0;
             if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
             if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
             if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

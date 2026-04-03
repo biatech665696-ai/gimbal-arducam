@@ -954,14 +954,8 @@ public:
             fgMask = fgCurr;
         }
 
-        // === DUAL-MODE SELECTION: MOG2 + frame-diff merge ===
-        // Mode A (fgMask): motion-compensated MOG2
-        // Mode B (maskB): compensated frame-diff — catches object when MOG2 absorbed it
-        // Always OR the two masks: MOG2 is good at stable detection,
-        // frame-diff is good at catching ANY moving object regardless of background model.
-        if (haveMaskB) {
-            fgMask |= maskB;
-        }
+        // === PRIMARY: MOG2 detection ===
+        // (fgMask already contains motion-compensated MOG2 result)
 
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel2_);
 
@@ -973,6 +967,19 @@ public:
 
         lastFGPixels_ = cv::countNonZero(fgMask);
         lastRawContours_ = (int)contours.size();
+
+        // === FALLBACK: if MOG2 found nothing, try frame-diff ===
+        // Frame-diff sees any moving object regardless of background model state.
+        // Only used when MOG2 has zero valid contours (likely absorbed the object).
+        bool usedFrameDiff = false;
+        if (contours.empty() && haveMaskB) {
+            cv::morphologyEx(maskB, maskB, cv::MORPH_CLOSE, kernel2_);
+            contours.clear();
+            cv::findContours(maskB.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+            lastRawContours_ = (int)contours.size();
+            // Don't update lastFGPixels_ — keep MOG2 value for FG_GATE downstream
+            usedFrameDiff = true;
+        }
 
         // === ФИЛЬТРАЦИЯ КОНТУРОВ ===
         // Determine search center: prefer external prediction, fallback to internal last position

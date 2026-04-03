@@ -1472,9 +1472,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (std::abs(ex) > MAX_ERR) ex = (ex > 0 ? MAX_ERR : -MAX_ERR);
             if (std::abs(ey) > MAX_ERR) ey = (ey > 0 ? MAX_ERR : -MAX_ERR);
 
-            // PURE P-D controller — no feedforward, no prediction
-            // For circular/curved motion, strong proportional tracking is better
-            // than linear prediction that always misses the curve
+            // PD controller — reduced Kp to keep in proportional zone
+            // (with Kp=2.5 everything was clamped → bang-bang behavior)
+            // Higher Kd acts as velocity matcher for moving targets
             static double prevEx = 0.0, prevEy = 0.0;
             static auto prevTime = std::chrono::steady_clock::now();
             auto nowTime = std::chrono::steady_clock::now();
@@ -1483,12 +1483,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
             double dist = std::sqrt(ex * ex + ey * ey);
 
-            // Strong P: near-full gain everywhere, only damped within 15px
-            double Kp = DEG_PER_PX * 2.5;
+            // Moderate P: proportional zone extends to ~187px before clamp
+            double Kp = DEG_PER_PX * 1.0;
             if (dist < 15.0) Kp *= (0.3 + 0.7 * dist / 15.0);
 
-            // D-term: damp oscillation near target
-            double Kd = 0.003;
+            // Strong D-term: velocity matching + overshoot damping
+            double Kd = 0.008;
             double dex = (ex - prevEx) / dt;
             double dey = (ey - prevEy) / dt;
 
@@ -1499,30 +1499,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevEy = ey;
             prevTime = nowTime;
 
-            // Adaptive slew limit: gentle near target, aggressive far away
-            // dist< 30px → 2.0°   (fine tracking)
-            // dist>=200px → 7.0°  (full speed catch-up)
-            double maxStep = 2.0 + 5.0 * std::min(dist / 200.0, 1.0);
-            if (stepYaw >  maxStep) stepYaw =  maxStep;
-            if (stepYaw < -maxStep) stepYaw = -maxStep;
-            if (stepPitch >  maxStep) stepPitch =  maxStep;
-            if (stepPitch < -maxStep) stepPitch = -maxStep;
+            // Constant slew limit — proportional zone is wide enough
+            // that this only clips at large errors (>187px)
+            const double MAX_STEP_DEG = 7.0;
+            if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
+            if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
+            if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;
+            if (stepPitch < -MAX_STEP_DEG) stepPitch = -MAX_STEP_DEG;
 
-            // Acceleration limiter: prevent instant direction reversal
-            // Max change in step per frame = 3° — forces smooth ramp up/down
-            static double prevStepY = 0.0, prevStepP = 0.0;
-            const double MAX_ACCEL = 3.0;
-            double dY = stepYaw - prevStepY;
-            double dP = stepPitch - prevStepP;
-            if (dY >  MAX_ACCEL) stepYaw   = prevStepY + MAX_ACCEL;
-            if (dY < -MAX_ACCEL) stepYaw   = prevStepY - MAX_ACCEL;
-            if (dP >  MAX_ACCEL) stepPitch = prevStepP + MAX_ACCEL;
-            if (dP < -MAX_ACCEL) stepPitch = prevStepP - MAX_ACCEL;
-            prevStepY = stepYaw;
-            prevStepP = stepPitch;
-
-            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f maxS=%.1f step=(%.2f,%.2f)\n",
-                    ex, ey, dist, maxStep, stepYaw, stepPitch);
+            fprintf(stderr, "CTRL: err=(%.0f,%.0f) dist=%.0f P=(%.2f,%.2f) D=(%.2f,%.2f) step=(%.2f,%.2f)\n",
+                    ex, ey, dist, Kp*ex, Kp*ey, Kd*dex, Kd*dey, stepYaw, stepPitch);
 
             yawDeg   = lastYawDeg   - stepYaw;
             pitchDeg = lastPitchDeg - stepPitch;
@@ -1546,7 +1532,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         else if (!d.valid && currentTrackingEnabled && !scanActive) {
             auto now = std::chrono::steady_clock::now();
             double sinceLastDetect = std::chrono::duration<double>(now - coastLastDetectTime).count();
-            const double COAST_MAX_SEC = 0.3; // short coast
+            const double COAST_MAX_SEC = 0.15; // very short coast — linear extrap hurts circular motion
 
             if (sinceLastDetect < COAST_MAX_SEC && sinceLastDetect > 0.02 &&
                 (std::abs(coastVx) > 5.0 || std::abs(coastVy) > 5.0)) {
@@ -1566,7 +1552,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 double stepYaw   = Kp * ex;
                 double stepPitch = Kp * ey;
 
-                const double MAX_STEP_DEG = 1.0;
+                const double MAX_STEP_DEG = 0.5;
                 if (stepYaw >  MAX_STEP_DEG) stepYaw =  MAX_STEP_DEG;
                 if (stepYaw < -MAX_STEP_DEG) stepYaw = -MAX_STEP_DEG;
                 if (stepPitch >  MAX_STEP_DEG) stepPitch =  MAX_STEP_DEG;

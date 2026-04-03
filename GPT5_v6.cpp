@@ -954,23 +954,14 @@ public:
             fgMask = fgCurr;
         }
 
-        // === DUAL-MODE SELECTION (MOG2 vs compensated frame-diff) ===
-        // Mode A (fgMask): motion-compensated MOG2 — best when camera stable
-        // Mode B (maskB): compensated frame-diff — fallback during camera motion / MOG2 spike
-        if (rawFG < 1500 && flowMag < 2.0f) {
-            // Mode A: MOG2 is clean and camera mostly stable
-            // fgMask already set
-        } else if (haveMaskB && flowMag >= 1.0f) {
-            // Mode B: camera moving → frame-diff more reliable
-            fgMask = maskB;
-        } else if (rawFG < 3000) {
-            // Transition: MOG2 recovering — use MOG2 anyway
-            // fgMask already set
-        } else if (haveMaskB) {
-            // MOG2 completely broken — use frame-diff
-            fgMask = maskB;
+        // === DUAL-MODE SELECTION: MOG2 + frame-diff merge ===
+        // Mode A (fgMask): motion-compensated MOG2
+        // Mode B (maskB): compensated frame-diff — catches object when MOG2 absorbed it
+        // Always OR the two masks: MOG2 is good at stable detection,
+        // frame-diff is good at catching ANY moving object regardless of background model.
+        if (haveMaskB) {
+            fgMask |= maskB;
         }
-        // else: keep fgMask (MOG2) as-is
 
         cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel2_);
 

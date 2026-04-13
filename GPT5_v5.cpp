@@ -317,6 +317,8 @@ static void* handleHttpClient(void* arg) {
             "<html><head><meta charset='utf-8'><title>Gimbal Control</title></head>"
             "<body style='margin:0;background:#000;display:flex;flex-direction:column;"
             "justify-content:center;align-items:center;height:100vh;outline:none' tabindex='0'>"
+            "<div style='color:#888;font:12px monospace;position:absolute;top:4px;left:8px;z-index:20'>"
+            "GPT5_v5.cpp | cbf4314</div>"
             "<img src='/stream.mjpg' style='max-width:100%;max-height:75vh'>"
             "<div id='status' style='color:#0f0;font:18px monospace;margin-top:8px'>"
             "Click page first, then use keyboard or buttons</div>"

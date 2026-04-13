@@ -316,9 +316,10 @@ static void* handleHttpClient(void* arg) {
             "Connection: close\r\n\r\n"
             "<html><head><meta charset='utf-8'><title>Gimbal Control</title></head>"
             "<body style='margin:0;background:#000;display:flex;flex-direction:column;"
-            "justify-content:center;align-items:center;height:100vh;outline:none' tabindex='0'>"
-            "<div style='color:#888;font:12px monospace;position:absolute;top:4px;left:8px;z-index:20'>"
-            "GPT5_v5.cpp | cbf4314</div>"
+            "justify-content:center;align-items:center;height:100vh;position:relative;outline:none' tabindex='0'>"
+            "<div style='color:#ff0;font:bold 16px monospace;position:fixed;top:6px;left:10px;z-index:9999;"
+            "background:rgba(0,0,0,0.85);padding:4px 12px;border:1px solid #ff0;border-radius:6px'>"
+            "GPT5_v5.cpp | 8111671</div>"
             "<img src='/stream.mjpg' style='max-width:100%;max-height:75vh'>"
             "<div id='status' style='color:#0f0;font:18px monospace;margin-top:8px'>"
             "Click page first, then use keyboard or buttons</div>"
@@ -2278,31 +2279,35 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         
         // Background rectangle for text
-        cv::rectangle(display, cv::Point(5, 5), cv::Point(650, 120), 
+        cv::rectangle(display, cv::Point(5, 5), cv::Point(440, 170), 
                      cv::Scalar(0, 0, 0), -1);
-        cv::rectangle(display, cv::Point(5, 5), cv::Point(650, 120), 
+        cv::rectangle(display, cv::Point(5, 5), cv::Point(440, 170), 
                      cv::Scalar(0, 255, 255), 2);
         
-        cv::putText(display, info.str(), cv::Point(10, 30), 
+        // File + commit label (first line) - RED
+        cv::putText(display, "GPT5_v5.cpp | 8111671", cv::Point(10, 30), 
+                   cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
+        
+        cv::putText(display, info.str(), cv::Point(10, 55), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 255, 255), 2);
         
         // Show tracking mode
-        cv::putText(display, "Mode: " + modeStr, cv::Point(10, 55), 
+        cv::putText(display, "Mode: " + modeStr, cv::Point(10, 80), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.6, modeColor, 2);
         
         // Show number of detected objects
         std::ostringstream objInfo;
         objInfo << "Objects detected: " << d.all_boxes.size();
-        cv::putText(display, objInfo.str(), cv::Point(10, 80), 
+        cv::putText(display, objInfo.str(), cv::Point(10, 105), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
         
         if (d.valid) {
             std::ostringstream pos;
             pos << "Target: (" << static_cast<int>(d.x) << ", " << static_cast<int>(d.y) << ")";
-            cv::putText(display, pos.str(), cv::Point(10, 105), 
+            cv::putText(display, pos.str(), cv::Point(10, 130), 
                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(0, 255, 0), 2);
         } else {
-            cv::putText(display, "Status: Searching for target...", cv::Point(10, 105), 
+            cv::putText(display, "Status: Searching for target...", cv::Point(10, 130), 
                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 128, 0), 2);
         }
         

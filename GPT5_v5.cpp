@@ -234,12 +234,22 @@ std::mutex displayMutex;
 cv::Mat displayFrame;
 std::atomic<bool> hasNewFrame(false);
 
+// Global tracking mode control (declared early for HTTP handler access)
+std::atomic<bool> trackingEnabled(true);  // Start with tracking ENABLED by default
+std::atomic<bool> scanEnabled(false);     // Scan mode OFF by default
+std::atomic<bool> trajectoryEnabled(true); // Trajectory drawing ON by default
+
 // HTTP MJPEG streaming globals
 std::atomic<bool> streamRunning(false);
 std::atomic<bool> remoteQuit(false);
 std::atomic<bool> remoteToggle(false);
 std::atomic<bool> remoteScanToggle(false);
 std::atomic<bool> remoteTrajToggle(false);
+
+// Remote nudge control (arrow keys from web UI)
+std::atomic<double> remoteNudgeYaw(0.0);
+std::atomic<double> remoteNudgePitch(0.0);
+const double NUDGE_STEP = 3.0;  // degrees per arrow press
 cv::Mat streamFrame;
 std::mutex streamMutex;
 const int STREAM_PORT = 8080;
@@ -261,12 +271,11 @@ static void* handleHttpClient(void* arg) {
     bool isCmdRequest = (request.rfind("GET /cmd/", 0) == 0);
 
     if (isCmdRequest) {
-        std::string ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-                        "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK";
         // Extract command: /cmd/X
         size_t cmdStart = 9; // length of "GET /cmd/"
         size_t cmdEnd = request.find(' ', cmdStart);
         std::string cmd = request.substr(cmdStart, cmdEnd - cmdStart);
+        std::string resultMsg = "OK";
         if (cmd == "q") {
             std::cout << "\n[REMOTE] Quit command received" << std::endl;
             remoteQuit = true;
@@ -279,7 +288,20 @@ static void* handleHttpClient(void* arg) {
         } else if (cmd == "t") {
             std::cout << "\n[REMOTE] Toggle trajectory command received" << std::endl;
             remoteTrajToggle = true;
+        } else if (cmd == "up") {
+            remoteNudgePitch.store(remoteNudgePitch.load() - NUDGE_STEP);
+        } else if (cmd == "down") {
+            remoteNudgePitch.store(remoteNudgePitch.load() + NUDGE_STEP);
+        } else if (cmd == "left") {
+            remoteNudgeYaw.store(remoteNudgeYaw.load() + NUDGE_STEP);
+        } else if (cmd == "right") {
+            remoteNudgeYaw.store(remoteNudgeYaw.load() - NUDGE_STEP);
+        } else if (cmd == "center") {
+            remoteNudgeYaw.store(0.0);
+            remoteNudgePitch.store(0.0);
         }
+        std::string ok = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                        "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\nOK";
         send(clientSocket, ok.c_str(), ok.length(), 0);
         close(clientSocket);
         return nullptr;
@@ -467,11 +489,9 @@ constexpr double SYSTEM_DELAY = 0.05;   // Реальная задержка: ~5
 const double CX = 960.0;   // Optical center X (half of 1920)
 const double CY = 540.0;   // Optical center Y (half of 1080)
 
-// Global tracking mode control
-std::atomic<bool> trackingEnabled(true);  // Start with tracking ENABLED by default
-std::atomic<bool> scanEnabled(false);     // Scan mode OFF by default
+// Global tracking mode control (defined above, near HTTP streaming globals)
+// trackingEnabled, scanEnabled, trajectoryEnabled are already declared
 std::atomic<bool> scanActiveNow(false);   // True when scan is currently driving servos
-std::atomic<bool> trajectoryEnabled(true); // Trajectory drawing ON by default
 
 /* =============== PWM CONTROL FUNCTIONS =============== */
 
@@ -2058,6 +2078,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 lastKnownY = std::clamp(lastKnownY + shiftY, 0.0, (double)(f.frame.rows - 1));
             }
 
+            // Apply remote nudge offset
+            yawDeg   += remoteNudgeYaw.load();
+            pitchDeg += remoteNudgePitch.load();
+            yawDeg   = std::clamp(yawDeg, 5.0, 175.0);
+            pitchDeg = std::clamp(pitchDeg, 5.0, 175.0);
+
             setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
@@ -2068,6 +2094,20 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             detector.notifyServoMove();
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
+
+        // Apply remote nudge even when no detection (manual servo control from web UI)
+        {
+            double ny = remoteNudgeYaw.load();
+            double np = remoteNudgePitch.load();
+            if (ny != 0.0 || np != 0.0) {
+                double newYaw   = std::clamp(lastYawDeg   + ny, 5.0, 175.0);
+                double newPitch = std::clamp(lastPitchDeg + np, 5.0, 175.0);
+                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(newYaw));
+                setServoAngle(PWM_CHANNEL_VERTICAL,   static_cast<float>(newPitch));
+                lastYawDeg   = newYaw;
+                lastPitchDeg = newPitch;
+            }
+        }
 
         // No coast servo — servo holds last position when object is lost.
         // Coast fought with servo corrections: inaccurate Kalman velocity

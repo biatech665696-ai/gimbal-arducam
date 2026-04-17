@@ -1029,8 +1029,16 @@ public:
             // Detection still works (warp aligns frame, object stays FG).
             // This is the key insight from GOLD baseline Phase 12.
             lr = 0.0;
+            framesSinceMotion_ = 0;
         } else {
-            lr = 0.003;
+            framesSinceMotion_++;
+            // Recovery phase: clean up stale FG accumulated during lr=0 freeze.
+            // 5 frames at lr=0.02 then drop to steady-state lr=0.003.
+            if (framesSinceMotion_ <= 5) {
+                lr = 0.02;
+            } else {
+                lr = 0.003;
+            }
         }
 
         // Warp current frame to model space (background stationary)

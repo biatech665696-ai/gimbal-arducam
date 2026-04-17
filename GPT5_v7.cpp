@@ -885,11 +885,11 @@ public:
     int lastRawContours() const { return lastRawContours_; }
     cv::Point2f lastGlobalFlow() const { return lastGlobalFlow_; }
 
-    // Call after every servo step: temporarily boost MOG2 lr so it quickly
-    // learns the new viewpoint instead of treating the whole shifted background as FG.
+    // Call after large servo step: briefly boost MOG2 lr so it learns new viewpoint.
+    // 2 frames at lr=0.5 is enough to absorb a 2°=12.7px shift without eating the target.
     void notifyServoMove() {
-        if (warmupFrames_ < 5)
-            warmupFrames_ = 5;  // 5 frames at lr=0.5 after each camera pan
+        if (warmupFrames_ < 2)
+            warmupFrames_ = 2;
     }
 
     void reinitBGS() {

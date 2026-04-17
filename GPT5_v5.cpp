@@ -268,6 +268,7 @@ static void* handleHttpClient(void* arg) {
                            request.rfind("GET /video", 0) == 0);
     bool isRootRequest = (request.rfind("GET / ", 0) == 0 ||
                          request.rfind("GET /\r", 0) == 0);
+    bool isControlRequest = (request.rfind("GET /control", 0) == 0);
     bool isCmdRequest = (request.rfind("GET /cmd/", 0) == 0);
 
     if (isCmdRequest) {
@@ -365,6 +366,74 @@ static void* handleHttpClient(void* arg) {
         return nullptr;
     }
 
+    if (isControlRequest) {
+        std::string html =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/html\r\n"
+            "Cache-Control: no-cache\r\n"
+            "Connection: close\r\n\r\n"
+            "<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+            "<title>Gimbal Remote</title></head>"
+            "<body style='margin:0;background:#111;display:flex;flex-direction:column;"
+            "align-items:center;justify-content:center;min-height:100vh;gap:20px' tabindex='0'>"
+            "<h1 style='color:#0ff;font:bold 28px monospace;margin:0'>Gimbal Control</h1>"
+            "<div id='status' style='color:#0f0;font:18px monospace'>Ready</div>"
+            "<div style='display:grid;grid-template-columns:1fr 1fr;gap:15px;padding:20px;max-width:400px;width:100%'>"
+            "<button onclick=\"sendCmd('f')\" style='font:bold 24px monospace;padding:20px;"
+            "background:#004;color:#0ff;border:3px solid #0ff;border-radius:12px;cursor:pointer'>"
+            "F - Track</button>"
+            "<button onclick=\"sendCmd('s')\" style='font:bold 24px monospace;padding:20px;"
+            "background:#004;color:#0ff;border:3px solid #0ff;border-radius:12px;cursor:pointer'>"
+            "S - Scan</button>"
+            "<button onclick=\"sendCmd('t')\" style='font:bold 24px monospace;padding:20px;"
+            "background:#004;color:#0ff;border:3px solid #0ff;border-radius:12px;cursor:pointer'>"
+            "T - Traj</button>"
+            "<button onclick=\"sendCmd('q')\" style='font:bold 24px monospace;padding:20px;"
+            "background:#400;color:#f88;border:3px solid #f00;border-radius:12px;cursor:pointer'>"
+            "Q - Quit</button>"
+            "</div>"
+            "<div style='display:flex;flex-direction:column;align-items:center;gap:10px;padding:10px'>"
+            "<button onclick=\"sendCmd('up')\" style='font:bold 22px monospace;padding:15px 30px;"
+            "background:#030;color:#0f0;border:2px solid #0f0;border-radius:8px'>UP</button>"
+            "<div style='display:flex;gap:10px'>"
+            "<button onclick=\"sendCmd('left')\" style='font:bold 22px monospace;padding:15px 30px;"
+            "background:#030;color:#0f0;border:2px solid #0f0;border-radius:8px'>LEFT</button>"
+            "<button onclick=\"sendCmd('center')\" style='font:bold 16px monospace;padding:15px 20px;"
+            "background:#330;color:#ff0;border:2px solid #ff0;border-radius:8px'>CTR</button>"
+            "<button onclick=\"sendCmd('right')\" style='font:bold 22px monospace;padding:15px 30px;"
+            "background:#030;color:#0f0;border:2px solid #0f0;border-radius:8px'>RIGHT</button>"
+            "</div>"
+            "<button onclick=\"sendCmd('down')\" style='font:bold 22px monospace;padding:15px 30px;"
+            "background:#030;color:#0f0;border:2px solid #0f0;border-radius:8px'>DOWN</button>"
+            "</div>"
+            "<script>"
+            "function sendCmd(cmd){"
+            "  var st=document.getElementById('status');"
+            "  st.textContent='Sending: '+cmd.toUpperCase()+'...';"
+            "  st.style.color='#ff0';"
+            "  var x=new XMLHttpRequest();"
+            "  x.open('GET','/cmd/'+cmd,true);"
+            "  x.timeout=3000;"
+            "  x.onload=function(){st.textContent='OK: '+cmd.toUpperCase();st.style.color='#0f0';};"
+            "  x.onerror=function(){st.textContent='Error: '+cmd.toUpperCase();st.style.color='#f00';};"
+            "  x.ontimeout=function(){st.textContent='Timeout';st.style.color='#f00';};"
+            "  x.send();"
+            "}"
+            "document.addEventListener('keydown',function(e){"
+            "  var k=e.key.toLowerCase();"
+            "  if(k=='q'||k=='escape'||k=='f'||k=='s'||k=='t'){e.preventDefault();sendCmd(k=='escape'?'q':k);}"
+            "  if(k=='arrowup'){e.preventDefault();sendCmd('up');}"
+            "  if(k=='arrowdown'){e.preventDefault();sendCmd('down');}"
+            "  if(k=='arrowleft'){e.preventDefault();sendCmd('left');}"
+            "  if(k=='arrowright'){e.preventDefault();sendCmd('right');}"
+            "});"
+            "</script>"
+            "</body></html>";
+        send(clientSocket, html.c_str(), html.length(), 0);
+        close(clientSocket);
+        return nullptr;
+    }
+
     if (!isStreamRequest) {
         std::string notFound = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n404";
         send(clientSocket, notFound.c_str(), notFound.length(), 0);
@@ -412,7 +481,7 @@ static void* handleHttpClient(void* arg) {
         sent = send(clientSocket, "\r\n", 2, MSG_NOSIGNAL);
         if (sent <= 0) break;
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(33));
+        std::this_thread::sleep_for(std::chrono::milliseconds(16));
     }
 
     close(clientSocket);

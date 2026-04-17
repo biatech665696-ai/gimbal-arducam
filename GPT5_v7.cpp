@@ -860,6 +860,7 @@ public:
         : mog2_(cv::createBackgroundSubtractorMOG2(500, 30.0, false))
         , kernel2_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(2, 2)))
         , kernel3_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3)))
+        , kernel5_(cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5)))
         , lastValidCenter_(-1, -1)
         , prevValidCenter_(-1, -1)
         , consecutiveDetections_(0)
@@ -1088,7 +1089,7 @@ public:
             fgMask = fgCurr;
         }
 
-        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel3_);
+        cv::morphologyEx(fgMask, fgMask, cv::MORPH_CLOSE, kernel5_);
 
         // Store fg mask (current-frame coords) for next frame's LK feature masking
         prevFgMask_ = fgMask.clone();
@@ -1200,6 +1201,7 @@ private:
     cv::Ptr<cv::BackgroundSubtractorMOG2> mog2_;
     cv::Mat kernel2_;
     cv::Mat kernel3_;
+    cv::Mat kernel5_;
     cv::Mat prevGray_;    // uint8, for LK tracking
     cv::Point2f lastValidCenter_;
     cv::Point2f prevValidCenter_;  // one before lastValidCenter_ for direction check

@@ -1047,14 +1047,16 @@ public:
         // Spike detection: sudden FG explosion vs quiet baseline (camera pan / LK failure).
         // Only fires during non-warmup frames (warmupFrames_==0) to avoid an infinite
         // reset loop while MOG2 is still settling.
-        float spikeThresh = std::max(2000.0f, 10.0f * (float)std::max(prevRawFG_, 5));
+        // Relaxed: min 5000 (was 2000), multiplier 20× (was 10×), warmup 2 (was 5).
+        // Camera pans routinely produce 1000-3000 fg pixels — those are NOT spikes.
+        float spikeThresh = std::max(5000.0f, 20.0f * (float)std::max(prevRawFG_, 5));
         bool fgSpike = (rawFG > (int)spikeThresh) && (warmupFrames_ == 0);
         if (!fgSpike)
             prevRawFG_ = rawFG;  // keep baseline stable during spike frames
 
         if (rawFG > 80000 || fgSpike) {
-            if (fgSpike && warmupFrames_ < 5)
-                warmupFrames_ = 5;  // adaptive warmup extension: re-learn for 5 frames
+            if (fgSpike && warmupFrames_ < 2)
+                warmupFrames_ = 2;  // brief re-learn (was 5 — too many blind frames)
             lastRawContours_ = 0;
             // prevFgMask_ NOT updated — LK keeps the pre-spike clean feature mask
             return d;

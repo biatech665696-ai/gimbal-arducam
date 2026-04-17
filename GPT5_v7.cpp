@@ -1141,6 +1141,36 @@ public:
             }
         }
 
+        // === КЛАСТЕРИЗАЦИЯ БЛИЗКИХ КОНТУРОВ ===
+        // Merge bboxes within 10px into single clusters to avoid counting
+        // fragments of one object as separate objects.
+        if (d.all_boxes.size() > 1) {
+            const int MERGE_GAP = 10; // pixels in det-space
+            std::vector<cv::Rect> merged;
+            std::vector<bool> used(d.all_boxes.size(), false);
+            for (size_t i = 0; i < d.all_boxes.size(); i++) {
+                if (used[i]) continue;
+                cv::Rect cluster = d.all_boxes[i];
+                used[i] = true;
+                bool changed = true;
+                while (changed) {
+                    changed = false;
+                    for (size_t j = 0; j < d.all_boxes.size(); j++) {
+                        if (used[j]) continue;
+                        cv::Rect expanded(cluster.x - MERGE_GAP, cluster.y - MERGE_GAP,
+                                          cluster.width + 2 * MERGE_GAP, cluster.height + 2 * MERGE_GAP);
+                        if ((expanded & d.all_boxes[j]).area() > 0) {
+                            cluster = cluster | d.all_boxes[j]; // union
+                            used[j] = true;
+                            changed = true;
+                        }
+                    }
+                }
+                merged.push_back(cluster);
+            }
+            d.all_boxes = merged;
+        }
+
         // === ВЫБОР ЛУЧШЕГО ОБЪЕКТА ===
         // Если контур прошёл фильтр формы — это валидный объект.
         // Выбираем ближайший к последнему известному положению (или самый крупный).

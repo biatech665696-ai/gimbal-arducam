@@ -2297,8 +2297,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevErrY = filtErrY;
 
             // PD controller: P on RAW error (no lag), D on filtered error (smooth damping)
-            double Kp = 0.55;
-            double Kd = 0.30;
+            double Kp = 0.40;
+            double Kd = 0.25;
             double corrYaw   = -(ex * Kp + dex * Kd) * DEG_PER_PX;
             double corrPitch = -(ey * Kp + dey * Kd) * DEG_PER_PX;
             corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);

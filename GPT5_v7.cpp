@@ -2204,6 +2204,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastKnownX = -1;
             lastKnownY = -1;
         }
+        // Remember servo angles BEFORE this frame's correction for spatial gate compensation
+        double preFrameYaw = lastYawDeg;
+        double preFramePitch = lastPitchDeg;
 
         // === 9+10. SERVO CONTROL — PD controller with damping ===
         // P-term: proportional to pixel error → drives toward object
@@ -2256,15 +2259,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 
-            // Compensate spatial gate: servo moves camera → object shifts in frame
-            const double PX_PER_DEG = 1.0 / DEG_PER_PX;
-            double shiftX = -(yawDeg - lastYawDeg)   * PX_PER_DEG;
-            double shiftY = -(pitchDeg - lastPitchDeg) * PX_PER_DEG;
-            if (lastKnownX >= 0) {
-                lastKnownX = std::clamp(lastKnownX + shiftX, 0.0, (double)(f.frame.cols - 1));
-                lastKnownY = std::clamp(lastKnownY + shiftY, 0.0, (double)(f.frame.rows - 1));
-            }
-
             // Apply remote nudge offset
             yawDeg   += remoteNudgeYaw.load();
             pitchDeg += remoteNudgePitch.load();
@@ -2301,6 +2295,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         // No coast servo — servo holds last position when object is lost.
         // Coast fought with servo corrections: inaccurate Kalman velocity
         // moved servo away from object, then detection was lost in wrong direction.
+
+        // Compensate spatial gate for ANY servo movement this frame (tracking + nudge).
+        // Without this, the gate stays at old pixel coords while camera has panned,
+        // so next detection falls outside the 40px radius → object lost for 30+ frames.
+        if (lastKnownX >= 0) {
+            double dYaw   = lastYawDeg - preFrameYaw;
+            double dPitch = lastPitchDeg - preFramePitch;
+            if (dYaw != 0.0 || dPitch != 0.0) {
+                const double PX_PER_DEG_COMP = 1920.0 / 72.0 / 1.05;
+                lastKnownX = std::clamp(lastKnownX - dYaw   * PX_PER_DEG_COMP, 0.0, (double)(f.frame.cols - 1));
+                lastKnownY = std::clamp(lastKnownY - dPitch * PX_PER_DEG_COMP, 0.0, (double)(f.frame.rows - 1));
+            }
+        }
 
         // ROI для визуализации
         lastROI = dynROI.getROI() & cv::Rect(0, 0, display.cols, display.rows);

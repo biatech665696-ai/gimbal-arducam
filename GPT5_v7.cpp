@@ -2273,29 +2273,34 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoAllowed) {
             // Use averaged detection position to reduce centroid jitter before servo
-            // Use current detection directly for P-term (zero lag).
-            // detAvgBuf still feeds EMA for D-term smoothing.
-            double ex = d.x - cx;
-            double ey = d.y - cy;
+            double avgX = d.x, avgY = d.y;
+            if (!detAvgBuf.empty()) {
+                avgX = 0; avgY = 0;
+                for (auto& p : detAvgBuf) { avgX += p.x; avgY += p.y; }
+                avgX /= detAvgBuf.size();
+                avgY /= detAvgBuf.size();
+            }
+            double ex = avgX - cx;
+            double ey = avgY - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            // EMA filter on error: used ONLY for D-term to smooth derivative noise.
-            // P-term uses raw error for zero-lag response.
+            // EMA filter on error: smooth out measurement noise + break feedback oscillation
+            // alpha=0.4 → ~60% of previous, delays response ~1 frame but kills oscillation
             const double ALPHA = 0.4;
             filtErrX = ALPHA * ex + (1.0 - ALPHA) * filtErrX;
             filtErrY = ALPHA * ey + (1.0 - ALPHA) * filtErrY;
 
-            // D-term: derivative of filtered error (smooth, no noise spikes)
+            // D-term: derivative of filtered error
             double dex = filtErrX - prevErrX;
             double dey = filtErrY - prevErrY;
             prevErrX = filtErrX;
             prevErrY = filtErrY;
 
-            // PD controller: P on RAW error (no lag), D on filtered error (smooth damping)
+            // PD controller on filtered error: Kp=0.40, Kd=0.25
             double Kp = 0.40;
             double Kd = 0.25;
-            double corrYaw   = -(ex * Kp + dex * Kd) * DEG_PER_PX;
-            double corrPitch = -(ey * Kp + dey * Kd) * DEG_PER_PX;
+            double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
+            double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
             corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
             corrPitch = std::clamp(corrPitch, -2.0, 2.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);

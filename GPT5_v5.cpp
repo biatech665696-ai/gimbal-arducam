@@ -315,25 +315,23 @@ static void* handleHttpClient(void* arg) {
             "Pragma: no-cache\r\n"
             "Connection: close\r\n\r\n"
             "<html><head><meta charset='utf-8'><title>Gimbal Control</title></head>"
-            "<body style='margin:0;background:#000;display:flex;flex-direction:column;"
-            "justify-content:center;align-items:center;height:100vh;position:relative;outline:none' tabindex='0'>"
-            "<div style='color:#ff0;font:bold 16px monospace;position:fixed;top:6px;left:10px;z-index:9999;"
-            "background:rgba(0,0,0,0.85);padding:4px 12px;border:1px solid #ff0;border-radius:6px'>"
-            "GPT5_v5.cpp | bcf5c61</div>"
-            "<img src='/stream.mjpg' style='max-width:100%;max-height:75vh'>"
-            "<div id='status' style='color:#0f0;font:18px monospace;margin-top:8px'>"
+            "<body style='margin:0;padding-bottom:80px;background:#000;display:flex;flex-direction:column;"
+            "align-items:center;min-height:100vh;outline:none;box-sizing:border-box' tabindex='0'>"
+            "<img src='/stream.mjpg' style='max-width:100%;width:100%'>"
+            "<div id='status' style='color:#0f0;font:16px monospace;margin:4px 0'>"
             "Click page first, then use keyboard or buttons</div>"
-            "<div style='margin-top:8px;display:flex;gap:12px;flex-wrap:wrap;justify-content:center'>"
-            "<button onclick=\"sendCmd('f')\" style='font:bold 22px monospace;padding:12px 24px;"
+            "<div style='position:fixed;bottom:0;left:0;right:0;background:rgba(0,0,0,0.9);"
+            "display:flex;gap:10px;flex-wrap:wrap;justify-content:center;padding:8px;z-index:999'>"
+            "<button onclick=\"sendCmd('f')\" style='font:bold 20px monospace;padding:10px 20px;"
             "background:#004;color:#0ff;border:2px solid #0ff;border-radius:8px;cursor:pointer'>"
             "F - Track/Fixed</button>"
-            "<button onclick=\"sendCmd('s')\" style='font:bold 22px monospace;padding:12px 24px;"
+            "<button onclick=\"sendCmd('s')\" style='font:bold 20px monospace;padding:10px 20px;"
             "background:#004;color:#0ff;border:2px solid #0ff;border-radius:8px;cursor:pointer'>"
             "S - Scan</button>"
-            "<button onclick=\"sendCmd('t')\" style='font:bold 22px monospace;padding:12px 24px;"
+            "<button onclick=\"sendCmd('t')\" style='font:bold 20px monospace;padding:10px 20px;"
             "background:#004;color:#0ff;border:2px solid #0ff;border-radius:8px;cursor:pointer'>"
             "T - Trajectory</button>"
-            "<button onclick=\"sendCmd('q')\" style='font:bold 22px monospace;padding:12px 24px;"
+            "<button onclick=\"sendCmd('q')\" style='font:bold 20px monospace;padding:10px 20px;"
             "background:#400;color:#f88;border:2px solid #f00;border-radius:8px;cursor:pointer'>"
             "Q - Quit</button>"
             "</div>"
@@ -2343,9 +2341,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                            cv::FONT_HERSHEY_SIMPLEX, fontScale, cv::Scalar(0, 255, 255), thickness);
             }
 
-            std::lock_guard<std::mutex> lock(displayMutex);
-            displayFrame = display;
-            hasNewFrame = true;
+            // Update both: local display frame AND remote stream frame
+            {
+                std::lock_guard<std::mutex> lock(displayMutex);
+                displayFrame = display;
+                hasNewFrame = true;
+            }
+            if (streamRunning) {
+                std::lock_guard<std::mutex> lock(streamMutex);
+                cv::resize(display, streamFrame, cv::Size(1600, 900));
+            }
         }
         
     }
@@ -2394,11 +2399,17 @@ int main()
     std::cout << "Press S to enable/disable scan mode" << std::endl;
     std::cout << "============================================================================================" << std::endl;
     
-    // Create display window
-    cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
-    cv::moveWindow("Predictive Gimbal Control", 100, 50);
-    cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
-    std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
+    // Create display window (optional — works without X11)
+    bool guiAvailable = false;
+    try {
+        cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
+        cv::moveWindow("Predictive Gimbal Control", 100, 50);
+        cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
+        guiAvailable = true;
+        std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
+    } catch (...) {
+        std::cout << "[INFO] No X11 display — running headless (HTTP stream only)" << std::endl;
+    }
 
     // Start HTTP MJPEG stream server
     streamRunning = true;
@@ -2419,20 +2430,16 @@ int main()
                 }
             }
             
-            if (!frame.empty()) {
+            if (!frame.empty() && guiAvailable) {
                 cv::Mat display;
                 cv::resize(frame, display, cv::Size(1280, 720));
                 cv::imshow("Predictive Gimbal Control", display);
-                // Update HTTP MJPEG stream frame
-                if (streamRunning) {
-                    std::lock_guard<std::mutex> lock(streamMutex);
-                    cv::resize(frame, streamFrame, cv::Size(1600, 900));
-                }
             }
         }
         
         // Check for key press (minimal 1ms delay for fastest response)
-        int key = cv::waitKey(1);
+        int key = guiAvailable ? cv::waitKey(1) : -1;
+        if (!guiAvailable) std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if (key != -1) {  // If any key was pressed
             std::cout << "\n[KEY DETECTED] Code: " << key << " (char: '" << (char)key << "')" << std::endl;
         }
@@ -2540,6 +2547,8 @@ void killPreviousInstances() {
         }
     }
     closedir(dir);
+    // Wait for killed processes to release port 8080
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 }
 
 //https://github.com/biatech665696-ai/gimbal-arducam.git1

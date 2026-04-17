@@ -2273,15 +2273,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoAllowed) {
             // Use averaged detection position to reduce centroid jitter before servo
-            double avgX = d.x, avgY = d.y;
-            if (!detAvgBuf.empty()) {
-                avgX = 0; avgY = 0;
-                for (auto& p : detAvgBuf) { avgX += p.x; avgY += p.y; }
-                avgX /= detAvgBuf.size();
-                avgY /= detAvgBuf.size();
-            }
-            double ex = avgX - cx;
-            double ey = avgY - cy;
+            // Use current detection directly for P-term (zero lag).
+            // detAvgBuf still feeds EMA for D-term smoothing.
+            double ex = d.x - cx;
+            double ey = d.y - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
             // EMA filter on error: used ONLY for D-term to smooth derivative noise.

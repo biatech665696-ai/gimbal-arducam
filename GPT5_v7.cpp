@@ -1022,6 +1022,13 @@ public:
         if (warmupFrames_ > 0) {
             lr = 0.5;
             warmupFrames_--;
+        } else if (flowMag > 1.5f) {
+            // Camera is moving (servo correction in progress).
+            // FREEZE MOG2: don't learn from shifted frames — even with warp,
+            // residual misalignment causes MOG2 to absorb the object into BG.
+            // Detection still works (warp aligns frame, object stays FG).
+            // This is the key insight from GOLD baseline Phase 12.
+            lr = 0.0;
         } else {
             lr = 0.003;
         }
@@ -2272,11 +2279,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             servoSettleCounter = 0;  // correct every frame
-            // Notify MOG2 only for large corrections (>0.3°).
-            // Small tracking corrections (~0.1°) don't shift camera enough
-            // to warrant lr=0.5 warmup, which was eating the target into background.
-            if (std::abs(corrYaw) > 0.3 || std::abs(corrPitch) > 0.3)
-                detector.notifyServoMove();
+            // No notifyServoMove: lr=0 freeze during motion handles this better.
+            // Warmup boosted lr=0.5 which absorbed the target into background.
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 

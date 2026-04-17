@@ -2284,23 +2284,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ey = avgY - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            // EMA filter on error: smooth out measurement noise + break feedback oscillation
-            // alpha=0.4 → ~60% of previous, delays response ~1 frame but kills oscillation
+            // EMA filter on error: used ONLY for D-term to smooth derivative noise.
+            // P-term uses raw error for zero-lag response.
             const double ALPHA = 0.4;
             filtErrX = ALPHA * ex + (1.0 - ALPHA) * filtErrX;
             filtErrY = ALPHA * ey + (1.0 - ALPHA) * filtErrY;
 
-            // D-term: derivative of filtered error
+            // D-term: derivative of filtered error (smooth, no noise spikes)
             double dex = filtErrX - prevErrX;
             double dey = filtErrY - prevErrY;
             prevErrX = filtErrX;
             prevErrY = filtErrY;
 
-            // PD controller on filtered error: Kp=0.40, Kd=0.25
+            // PD controller: P on RAW error (no lag), D on filtered error (smooth damping)
             double Kp = 0.40;
             double Kd = 0.25;
-            double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
-            double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
+            double corrYaw   = -(ex * Kp + dex * Kd) * DEG_PER_PX;
+            double corrPitch = -(ey * Kp + dey * Kd) * DEG_PER_PX;
             corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
             corrPitch = std::clamp(corrPitch, -2.0, 2.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);

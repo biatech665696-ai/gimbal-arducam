@@ -2322,6 +2322,29 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
+        // Soft coast: when detection lost for 1-3 frames BUT Kalman confidence
+        // is still decent, nudge servo along Kalman velocity with reduced gain.
+        // This keeps servo moving in the right direction during brief dropouts
+        // instead of freezing (which lets the object escape the spatial gate).
+        // Limited to 3 frames to avoid runaway from bad Kalman velocity.
+        if (!servoAllowed && !scanActive && currentTrackingEnabled
+            && framesWithoutDetection >= 1 && framesWithoutDetection <= 3
+            && state.confidence >= 0.3) {
+            const double DEG_PER_PX_COAST = 72.0 / 1920.0 * 1.05;
+            double coastGain = 0.5;  // half of normal — conservative
+            double dt = 1.0 / 45.0;  // frame period at 45 fps
+            double coastCorrYaw   = -(state.vx * dt) * coastGain * DEG_PER_PX_COAST;
+            double coastCorrPitch = -(state.vy * dt) * coastGain * DEG_PER_PX_COAST;
+            coastCorrYaw   = std::clamp(coastCorrYaw,   -1.0, 1.0);  // tighter clamp than tracking
+            coastCorrPitch = std::clamp(coastCorrPitch, -1.0, 1.0);
+            yawDeg   = std::clamp(lastYawDeg   + coastCorrYaw,   5.0, 175.0);
+            pitchDeg = std::clamp(lastPitchDeg + coastCorrPitch, 5.0, 175.0);
+            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+            lastYawDeg = yawDeg;
+            lastPitchDeg = pitchDeg;
+        }
+
         // Apply remote nudge even when no detection (manual servo control from web UI)
         {
             double ny = remoteNudgeYaw.load();
@@ -2335,10 +2358,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 lastPitchDeg = newPitch;
             }
         }
-
-        // No coast servo — servo holds last position when object is lost.
-        // Coast fought with servo corrections: inaccurate Kalman velocity
-        // moved servo away from object, then detection was lost in wrong direction.
 
         // Compensate spatial gate for ANY servo movement this frame (tracking + nudge).
         // Without this, the gate stays at old pixel coords while camera has panned,

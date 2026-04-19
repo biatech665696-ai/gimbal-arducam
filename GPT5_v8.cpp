@@ -1083,9 +1083,12 @@ public:
         } else {
             framesSinceMotion_++;
             // Recovery phase: clean up stale FG accumulated during lr=0 freeze.
-            // 5 frames at lr=0.02 then drop to steady-state lr=0.003.
-            if (framesSinceMotion_ <= 5) {
-                lr = 0.02;
+            // First 2 frames: lr=0 (object may be stationary — don't absorb it).
+            // Frames 3-5: gentle lr=0.005 to clean stale FG. Then steady-state.
+            if (framesSinceMotion_ <= 2) {
+                lr = 0.0;   // object just stopped — don't learn yet
+            } else if (framesSinceMotion_ <= 5) {
+                lr = 0.005; // gentle cleanup
             } else {
                 lr = 0.003;
             }
@@ -2123,7 +2126,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 40.0f;  // 40px in det space = 160px full-frame
+        // Spatial gate: start at 60px, widen by 4px per missed frame (max 120px)
+        float searchRad = std::min(60.0f + framesWithoutDetection * 4.0f, 120.0f);
         if (lastKnownX >= 0) {
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
@@ -2312,8 +2316,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (d.valid) {
             lastKnownX = d.x;
             lastKnownY = d.y;
-        } else if (framesWithoutDetection > 30) {
-            // Lost object completely — reset spatial gating, allow full-frame search
+        } else if (framesWithoutDetection > 12) {
+            // Lost object — reset spatial gating, allow full-frame search
             lastKnownX = -1;
             lastKnownY = -1;
         }
@@ -2618,12 +2622,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         {
             // === KEY HELP OVERLAY (bottom-right corner) ===
             const char* helpLines[] = {
+                "Click - Aim & Fire",
+                "R - Reset fire",
                 "F - Track / Fixed",
                 "S - Scan on/off",
                 "T - Trajectory on/off",
                 "Q - Quit"
             };
-            const int nLines = 4;
+            const int nLines = 6;
             const double fontScale = 0.65;
             const int thickness = 2;
             const int lineH = 28;

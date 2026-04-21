@@ -2688,6 +2688,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     }
 }
 
+// Mouse callback for local (host) display window
+// Reuses remoteMouseX/Y/Event — tracking thread handles aim+fire identically to web click
+static void onLocalMouseCb(int event, int x, int y, int /*flags*/, void* /*userdata*/) {
+    if (event == cv::EVENT_LBUTTONDOWN) {
+        // Convert display (1280×720) → stream (1600×900) space used by tracking thread
+        remoteMouseX.store((int)(x * 1600.0 / 1280.0));
+        remoteMouseY.store((int)(y * 900.0 / 720.0));
+        remoteMouseEvent.store(1);
+    }
+}
+
 /* =============== MAIN =============== */
 
 int main()
@@ -2736,6 +2747,7 @@ int main()
     cv::namedWindow("Predictive Gimbal Control", cv::WINDOW_GUI_NORMAL | cv::WINDOW_NORMAL);
     cv::moveWindow("Predictive Gimbal Control", 100, 50);
     cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
+    cv::setMouseCallback("Predictive Gimbal Control", onLocalMouseCb);
     std::cout << "\n*** CLICK ON THE WINDOW TO ACTIVATE KEYBOARD CONTROL ***\n" << std::endl;
 
     TerminalKeyboardMode terminalKeyboard;

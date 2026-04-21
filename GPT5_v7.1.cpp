@@ -247,6 +247,8 @@ std::atomic<bool> remoteQuit(false);
 std::atomic<bool> remoteToggle(false);
 std::atomic<bool> remoteScanToggle(false);
 std::atomic<bool> remoteTrajToggle(false);
+std::atomic<bool> remoteFireReset(false);
+std::atomic<bool> gpioFireState(false);  // tracks GPIO26 current state
 
 // Remote nudge control (arrow keys from web UI)
 std::atomic<double> remoteNudgeYaw(0.0);
@@ -368,7 +370,8 @@ static void* handleHttpClient(void* arg) {
              << "\"trajectory\":" << (trajectoryEnabled.load() ? "true" : "false") << ","
              << "\"last_cmd\":" << remoteLastCmd.load() << ","
              << "\"seq\":" << remoteStatusSeq.load() << ","
-             << "\"quit\":" << (remoteQuit.load() ? "true" : "false")
+             << "\"quit\":" << (remoteQuit.load() ? "true" : "false") << ","
+             << "\"fire\":" << (gpioFireState.load() ? "true" : "false")
              << "}";
         std::string body = json.str();
         std::ostringstream resp;
@@ -412,6 +415,11 @@ static void* handleHttpClient(void* arg) {
             remoteTrajToggle = true;
             remoteCmdNotify.store(3);
             cmdCode = 3;
+        } else if (cmd == "r") {
+            std::cout << "\n[REMOTE] Fire reset command received" << std::endl;
+            remoteFireReset = true;
+            remoteCmdNotify.store(6);
+            cmdCode = 6;
         } else if (cmd == "up") {
             remoteNudgePitch.store(remoteNudgePitch.load() - NUDGE_STEP);
         } else if (cmd == "down") {
@@ -499,22 +507,39 @@ static void* handleHttpClient(void* arg) {
             "<html><head><meta charset='UTF-8'><title>GPT5 remote</title></head>"
             "<body style='margin:0;background:#000;color:#fff;font-family:Arial,sans-serif'>"
             "<div style='position:relative;width:100vw;height:100vh;overflow:hidden;background:#000'>"
-            "<img src='/stream.mjpg' alt='Stream' style='display:block;width:100%;height:100%;object-fit:contain;background:#000'>"
+            "<img id='streamImg' src='/stream.mjpg' alt='Stream' style='display:block;width:100%;height:100%;object-fit:contain;background:#000'>"
             "<div id='panel' style='position:absolute;top:12px;right:12px;z-index:10;background:rgba(0,0,0,0.45);padding:8px;border:1px solid #888;border-radius:8px'>"
             "<div id='remoteStatus' style='font-size:14px;color:#9f9;margin:0 0 6px 2px'>Ready</div>"
             "<button id='btn-f' type='button' onclick='sendCmd(\"f\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>F</button>"
             "<button id='btn-s' type='button' onclick='sendCmd(\"s\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>S</button>"
             "<button id='btn-t' type='button' onclick='sendCmd(\"t\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>T</button>"
+            "<button id='btn-r' type='button' onclick='sendCmd(\"r\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>R</button>"
             "<button id='btn-q' type='button' onclick='sendCmd(\"q\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>Q</button>"
             "</div>"
             "<script>"
             "var lastSeq=-1;"
             "function setBtn(key,active){var el=document.getElementById('btn-'+key);if(!el)return;el.style.background=active?'#0f766e':'#f0f0f0';el.style.color=active?'#fff':'#000';el.style.border='2px solid '+(active?'#5eead4':'#888');}"
             "function setStatus(text,color){var el=document.getElementById('remoteStatus');el.textContent=text;el.style.color=color||'#9f9';}"
-            "function applyState(state){setBtn('f',state.tracking);setBtn('s',state.scan);setBtn('t',state.trajectory);setBtn('q',false);if(state.seq!==lastSeq){lastSeq=state.seq;if(state.last_cmd===1)setStatus('F ok','#9f9');else if(state.last_cmd===2)setStatus('S ok','#9f9');else if(state.last_cmd===3)setStatus('T ok','#9f9');else if(state.last_cmd===4)setStatus('Q ok','#f99');else if(state.last_cmd===5)setStatus('Aim ok','#9f9');}}"
+            "function applyState(state){setBtn('f',state.tracking);setBtn('s',state.scan);setBtn('t',state.trajectory);setBtn('r',state.fire);setBtn('q',false);if(state.seq!==lastSeq){lastSeq=state.seq;if(state.last_cmd===1)setStatus('F ok','#9f9');else if(state.last_cmd===2)setStatus('S ok','#9f9');else if(state.last_cmd===3)setStatus('T ok','#9f9');else if(state.last_cmd===4)setStatus('Q ok','#f99');else if(state.last_cmd===5)setStatus('Aim ok','#9f9');else if(state.last_cmd===6)setStatus('R reset','#9f9');}}"
             "function fetchStatus(){var x=new XMLHttpRequest();x.open('GET','/status?ts='+Date.now(),true);x.timeout=1200;x.onload=function(){if(x.status!==200)return;try{applyState(JSON.parse(x.responseText));}catch(e){setStatus('status err','#f99');}};x.onerror=function(){setStatus('offline','#f99');};x.ontimeout=function(){setStatus('timeout','#f99');};x.send();}"
             "function sendCmd(cmd){setStatus('send '+cmd.toUpperCase(),'#ffd166');var x=new XMLHttpRequest();x.open('GET','/cmd/'+cmd,true);x.timeout=1500;x.onload=function(){if(x.status===200){fetchStatus();}else{setStatus('cmd fail','#f99');}};x.onerror=function(){setStatus('cmd err','#f99');};x.ontimeout=function(){setStatus('cmd timeout','#f99');};x.send();}"
-            "document.addEventListener('keydown',function(e){var k=e.key.toLowerCase();if(k==='f'||k==='s'||k==='t')sendCmd(k);else if(k==='q'||k==='escape')sendCmd('q');});"
+            "document.addEventListener('keydown',function(e){var k=e.key.toLowerCase();if(k==='f'||k==='s'||k==='t'||k==='r')sendCmd(k);else if(k==='q'||k==='escape')sendCmd('q');});"
+            "var simg=document.getElementById('streamImg');"
+            "simg.addEventListener('mousedown',function(e){"
+            "var r=simg.getBoundingClientRect();"
+            "var iw=1600,ih=900,ew=r.width,eh=r.height;"
+            "var scale=Math.min(ew/iw,eh/ih);"
+            "var rw=iw*scale,rh=ih*scale;"
+            "var ox=(ew-rw)/2,oy=(eh-rh)/2;"
+            "var sx=Math.round((e.clientX-r.left-ox)/scale);"
+            "var sy=Math.round((e.clientY-r.top-oy)/scale);"
+            "if(sx<0||sy<0||sx>=iw||sy>=ih)return;"
+            "var x=new XMLHttpRequest();"
+            "x.open('GET','/mouse?event=1&x='+sx+'&y='+sy,true);"
+            "x.timeout=1500;x.send();"
+            "setStatus('Aim ('+sx+','+sy+')','#ffd166');"
+            "setTimeout(fetchStatus,300);"
+            "});"
             "fetchStatus();setInterval(fetchStatus,500);"
             "</script>"
             "</div>"
@@ -629,6 +654,7 @@ void* httpStreamServer(void* arg) {
 
 #define GPIO_HORIZONTAL 18
 #define GPIO_VERTICAL 19
+#define GPIO_FIRE 26
 
 #define PWM_CHIP 0
 #define PWM_CHANNEL_HORIZONTAL 2  // GPIO18
@@ -748,7 +774,24 @@ static bool initSysfsPwm() {
     }
     
     std::cerr << "PWM initialization complete!" << std::endl;
+
+    // Initialize GPIO26 as digital output (fire signal) via pinctrl (Pi 5)
+    {
+        int ret = system(("pinctrl set " + std::to_string(GPIO_FIRE) + " op dl").c_str());
+        if (ret != 0) {
+            std::cerr << "WARNING: GPIO" << GPIO_FIRE << " pinctrl init failed (ret=" << ret << ")" << std::endl;
+        } else {
+            std::cerr << "GPIO" << GPIO_FIRE << " initialized as output via pinctrl (fire signal)" << std::endl;
+        }
+    }
+
     return true;
+}
+
+static void setGpioFire(bool on) {
+    std::string cmd = "pinctrl set " + std::to_string(GPIO_FIRE) + (on ? " op dh" : " op dl");
+    int ret = system(cmd.c_str());
+    if (ret != 0) std::cerr << "WARNING: setGpioFire(" << on << ") FAILED! ret=" << ret << std::endl;
 }
 
 static void shutdownSysfsPwm() {
@@ -759,6 +802,9 @@ static void shutdownSysfsPwm() {
     // Set duty cycle to 0
     writeToFile(getPwmPath(PWM_CHANNEL_HORIZONTAL) + "/duty_cycle", "0");
     writeToFile(getPwmPath(PWM_CHANNEL_VERTICAL) + "/duty_cycle", "0");
+
+    // Reset GPIO26 fire signal via pinctrl
+    setGpioFire(false);
 }
 
 // Кэшируем последнее записанное duty_cycle чтобы не писать в sysfs повторно
@@ -1981,6 +2027,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     setServoAngle(PWM_CHANNEL_VERTICAL,   (float)newPitch);
                     lastYawDeg   = newYaw;
                     lastPitchDeg = newPitch;
+                    // Fire: set GPIO26 HIGH on click
+                    setGpioFire(true);
+                    gpioFireState.store(true);
                     remoteCmdNotify.store(5);
                     std::cout << "[REMOTE CLICK] stream(" << rmX << "," << rmY
                               << ") -> servo(" << std::fixed << std::setprecision(1)
@@ -2605,9 +2654,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
             overlayFrameCount++;
             if (overlayFrameCount - lastCmdFrameN < 90) {  // ~3s at 30fps
-                const char* cmdNames[] = {"", "F: TRACK TOGGLE", "S: SCAN TOGGLE",
-                                          "T: TRAJ TOGGLE",  "Q: QUIT",       "CLICK: AIM"};
-                const char* nm = (lastCmdCode >= 1 && lastCmdCode <= 5) ? cmdNames[lastCmdCode] : "CMD";
+                const char* cmdNames[] = {"" , "F: TRACK TOGGLE", "S: SCAN TOGGLE",
+                                          "T: TRAJ TOGGLE",  "Q: QUIT",       "CLICK: AIM", "R: FIRE RESET"};
+                const char* nm = (lastCmdCode >= 1 && lastCmdCode <= 6) ? cmdNames[lastCmdCode] : "CMD";
                 std::string txt = std::string("REMOTE: ") + nm;
                 int baseline = 0;
                 double fs = 1.4;
@@ -2672,6 +2721,7 @@ int main()
     std::cout << "  F   - Toggle tracking mode (FIXED 90deg <-> TRACKING ON)" << std::endl;
     std::cout << "  S   - Toggle scan mode (scan 0-180 deg when no object)" << std::endl;
     std::cout << "  T   - Toggle trajectory drawing" << std::endl;
+    std::cout << "  R   - Reset fire signal (GPIO" << GPIO_FIRE << "=0)" << std::endl;
     std::cout << "  Q   - Quit program" << std::endl;
     std::cout << "  ESC - Quit program" << std::endl;
     std::cout << "\n*** TRACKING MODE ENABLED BY DEFAULT ***" << std::endl;
@@ -2741,6 +2791,10 @@ int main()
             } else {
                 std::cout << ">>> SCAN MODE DISABLED <<<" << std::endl;
             }
+        } else if (key == 'r' || key == 'R' || remoteFireReset.exchange(false)) {  // R - reset fire signal (GPIO26 = 0)
+            setGpioFire(false);
+            gpioFireState.store(false);
+            std::cout << ">>> GPIO" << GPIO_FIRE << " = 0 (fire reset) <<<" << std::endl;
         } else if (key == 'f' || key == 'F' || remoteToggle.exchange(false)) {  // F - toggle tracking mode (local or remote)
             std::cout << "\n=== F KEY DETECTED - TOGGLING MODE ===" << std::endl;
             // Атомарный toggle: XOR с 1 (true)

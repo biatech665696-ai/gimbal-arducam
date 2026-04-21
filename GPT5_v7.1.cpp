@@ -1988,10 +1988,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     // === SCAN MODE STATE ===
     double scanYawDeg = 0.0;              // Current scan position
     int scanDirection = 1;                // 1 = forward (0→180), -1 = backward (180→0)
-    const double SCAN_STEP = 30.0;        // Degrees per step
-    const double SCAN_DWELL_SEC = 2.0;    // Seconds to dwell at each position
-    auto scanStepTime = std::chrono::steady_clock::now();
-    bool scanDwelling = false;            // True while waiting at a scan position
+    const double SCAN_SPEED = 6.0;        // Degrees per second (180 deg / 30 s)
+    auto scanLastTime = std::chrono::steady_clock::now();
     auto noDetectionSince = std::chrono::steady_clock::now();
     const double SCAN_START_DELAY = 3.0;  // Seconds without detection before scan starts
     bool wasScanning = false;
@@ -2252,10 +2250,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         bool scanActive = false;
         static int scanExitCount = 0;  // consecutive valid detections needed to leave scan
         if (scanEnabled.load() && currentTrackingEnabled) {
-            // Ignore detections for a few frames after a scan step (servo blur → FG spike)
-            static int scanStepBlind = 0;
-            if (scanStepBlind > 0) { scanStepBlind--; d.valid = false; }
-
             if (d.valid) {
                 scanExitCount++;
                 if (scanExitCount >= 5) {
@@ -2264,7 +2258,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     if (wasScanning) {
                         std::cout << "[SCAN] Object confirmed (5 consecutive). Switching to tracking." << std::endl;
                         wasScanning = false;
-                        scanDwelling = false;
                         scanExitCount = 0;
                         // Keep scanYawDeg/scanDirection — resume from same spot on next loss
                     }
@@ -2280,23 +2273,17 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
                     if (!wasScanning) {
                         wasScanning = true;
-                        // Do NOT reset scanYawDeg/scanDirection — continue from last position
-                        scanDwelling = true;
-                        scanStepTime = now;
-                        std::cout << "[SCAN] Resuming sweep at " << scanYawDeg
+                        scanLastTime = now;
+                        std::cout << "[SCAN] Smooth sweep resumed at " << scanYawDeg
                                   << " deg (dir=" << scanDirection << ")" << std::endl;
                     }
 
-                    double dwellElapsed = std::chrono::duration<double>(now - scanStepTime).count();
-                    if (scanDwelling && dwellElapsed >= SCAN_DWELL_SEC) {
-                        scanYawDeg += scanDirection * SCAN_STEP;
-                        if (scanYawDeg >= 180.0) { scanYawDeg = 180.0; scanDirection = -1; }
-                        else if (scanYawDeg <= 0.0) { scanYawDeg = 0.0; scanDirection = 1; }
-                        scanStepTime = now;
-                        scanStepBlind = 3;  // ignore 3 frames after step (servo motion blur)
-                        std::cout << "[SCAN] Step -> " << scanYawDeg
-                                  << " deg (dir=" << scanDirection << ")" << std::endl;
-                    }
+                    // Advance position proportionally to elapsed time
+                    double dt = std::chrono::duration<double>(now - scanLastTime).count();
+                    scanLastTime = now;
+                    scanYawDeg += scanDirection * SCAN_SPEED * dt;
+                    if (scanYawDeg >= 180.0) { scanYawDeg = 180.0; scanDirection = -1; }
+                    else if (scanYawDeg <= 0.0) { scanYawDeg = 0.0; scanDirection = 1; }
 
                     setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(scanYawDeg));
                     setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
@@ -2310,7 +2297,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (wasScanning) {
                 std::cout << "[SCAN] Scan mode deactivated." << std::endl;
                 wasScanning = false;
-                scanDwelling = false;
             }
             scanActiveNow = false;
             noDetectionSince = std::chrono::steady_clock::now();

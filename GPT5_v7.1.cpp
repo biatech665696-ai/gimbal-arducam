@@ -2276,11 +2276,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
                     if (!wasScanning) {
                         wasScanning = true;
-                        scanYawDeg = 90.0;
+                        scanYawDeg = 0.0;
                         scanDirection = 1;
                         scanDwelling = true;
                         scanStepTime = now;
-                        std::cout << "[SCAN] Starting sweep at 90 deg (dir=1)" << std::endl;
+                        std::cout << "[SCAN] Starting sweep at 0 deg (dir=1)" << std::endl;
                     }
 
                     double dwellElapsed = std::chrono::duration<double>(now - scanStepTime).count();
@@ -2690,8 +2690,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
 
             // === REMOTE COMMAND FLASH OVERLAY ===
-            static int lastCmdCode = 0;
             static int lastCmdFrameN = -999;
+            static int lastCmdCode = 0;
             static int overlayFrameCount = 0;
             int newCmd = remoteCmdNotify.exchange(0);
             if (newCmd > 0) {
@@ -2944,3 +2944,5 @@ void killPreviousInstances() {
 }
 
 //https://github.com/biatech665696-ai/gimbal-arducam.git1
+
+//sudo pkill -f "GPT5_v" 2>/dev/null; sleep 1 && cd /home/bia/projects && sudo DISPLAY=:0 XAUTHORITY=/home/bia/.Xauthority ./GPT5_v7.1 2>&1 | tee /tmp/v71_run.log

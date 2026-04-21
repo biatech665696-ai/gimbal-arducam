@@ -1463,13 +1463,15 @@ private:
             roiX_ = 0; roiY_ = 0; roiW_ = frameW_; roiH_ = frameH_;
             return;
         }
-        double padFactor = 4.0;
+        // Tight ROI: pad = object_size * 2.0 when tracking, grows on loss.
+        // Was 4.0 — produced boxes 4-8x larger than object, confusing to watch.
+        double padFactor = 2.0;
         double speed = std::sqrt(vx_ * vx_ + vy_ * vy_);
-        padFactor += speed * 0.02;
-        if (confidence_ < 0.5) padFactor *= (2.0 - confidence_);
-        padFactor += framesSinceDetection_ * 0.3;
+        padFactor += speed * 0.01;  // less speed expansion (was 0.02)
+        if (confidence_ < 0.5) padFactor *= (1.5 - confidence_ * 0.5);  // softer growth
+        padFactor += framesSinceDetection_ * 0.2;  // slower grow on loss (was 0.3)
 
-        int minSz = 120, maxSz = std::min(frameW_, frameH_) * 3 / 4;
+        int minSz = 60, maxSz = std::min(frameW_, frameH_) * 3 / 4;  // minSz was 120
         roiW_ = std::clamp((int)(std::max(objW_, 20) * padFactor), minSz, maxSz);
         roiH_ = std::clamp((int)(std::max(objH_, 20) * padFactor), minSz, maxSz);
 

@@ -1183,12 +1183,21 @@ public:
                 if (dist > searchRadius) continue;
             }
 
+            // Dual-threshold: tight gate → allow small objects (tracking known position).
+            // Full-frame search → strict filter (no spatial anchor, noise must be rejected).
+            // Object area 4× smaller → det-space contour ~4px²; gate handles false positives.
+            double minArea    = hasSearchCenter ? 3.0   : 15.0;
+            double maxArea    = hasSearchCenter ? 800.0 : 1500.0;
+            int    minBoxDim  = hasSearchCenter ? 1     : 2;
+            int    maxBoxDim  = hasSearchCenter ? 60    : 100;
+            double minSolid   = hasSearchCenter ? 0.10  : 0.20;
+
             if (!atEdge &&
-                area >= 15.0 && area <= 1500.0 &&
-                solidity > 0.2 &&
-                bbox.width >= 2 && bbox.height >= 2 &&
-                bbox.width <= 100 && bbox.height <= 100 &&
-                aspectRatio > 0.12 && aspectRatio < 8.0) {
+                area >= minArea && area <= maxArea &&
+                solidity > minSolid &&
+                bbox.width >= minBoxDim && bbox.height >= minBoxDim &&
+                bbox.width <= maxBoxDim && bbox.height <= maxBoxDim &&
+                aspectRatio > 0.10 && aspectRatio < 10.0) {
 
                 d.all_boxes.push_back(cv::Rect(bbox.x + ox, bbox.y + oy, bbox.width, bbox.height));
                 validObjects.push_back(std::make_pair(area, (int)i));

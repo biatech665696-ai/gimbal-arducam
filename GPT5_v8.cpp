@@ -2160,10 +2160,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::cvtColor(f.frame, grayFull, cv::COLOR_BGR2GRAY);
         if (d.valid && !prevGrayFull.empty()
             && prevGrayFull.size() == grayFull.size()) {
-            float motionMag = 0;
-            cv::Rect detRect(d.box_x, d.box_y, d.box_w, d.box_h);
-            if (!motionFilter.validate(prevGrayFull, grayFull, detRect, motionMag))
-                d.valid = false;   // static ghost → reject
+            // Skip filter when already tracking (consecutiveValid > 0):
+            // servo follows object → object is nearly stationary in frame →
+            // motionMag ≈ 0 → filter wrongly kills valid detections.
+            // Only apply filter on first acquisition (no established track).
+            if (consecutiveValid == 0) {
+                float motionMag = 0;
+                cv::Rect detRect(d.box_x, d.box_y, d.box_w, d.box_h);
+                if (!motionFilter.validate(prevGrayFull, grayFull, detRect, motionMag))
+                    d.valid = false;   // static ghost → reject
+            }
         }
         prevGrayFull = grayFull;
 

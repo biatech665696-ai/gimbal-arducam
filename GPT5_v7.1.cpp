@@ -2094,6 +2094,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static int framesWithoutDetection = 0;  // for return-to-center
         static double prevErrX = 0, prevErrY = 0;  // for PD controller D-term
         static double filtErrX = 0, filtErrY = 0;  // EMA-filtered error
+        // Object size in det-space (480x270): updated on each valid detection.
+        // Used to set a tight searchRad proportional to object size instead of fixed 80px.
+        static int lastObjWDet = 20, lastObjHDet = 20;
         // Rolling 3-frame detection average: smooths centroid jitter (±40px)
         // without adding lag — window is short enough to follow moving objects.
         static std::deque<cv::Point2d> detAvgBuf;
@@ -2106,15 +2109,19 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        // Gate radius grows with time-without-detection but NEVER opens to full frame.
-        // Full-frame search grabs random contours → false lock → servo crash.
+        // Gate radius: tight (object-size-based) when tracking, grows when object lost.
+        // Base radius = objSize * 2.5 + 10px in det-space — tight enough to exclude
+        // competing blobs, large enough to handle 1-frame centroid jitter.
+        // When lost: grows 3px/frame until capped at 240px det-space (≈960px full).
+        // Never opens to full frame (prevents false lock → servo crash).
         float searchRad;
         if (lastKnownX < 0) {
             // No history at all (startup / mode switch) — only then use full frame
             searchRad = -1;  // -1 signals full frame inside detect()
         } else {
-            // Known position: radius grows 4px/frame, capped at 240px det-space (≈960px full)
-            searchRad = std::min(80.0f + framesWithoutDetection * 4.0f, 240.0f);
+            float tightRad = (float)std::max(lastObjWDet, lastObjHDet) * 2.5f + 10.0f;
+            tightRad = std::max(tightRad, 30.0f);  // never below 30px det-space
+            searchRad = std::min(tightRad + framesWithoutDetection * 3.0f, 240.0f);
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad < 0 ? 9999.0f : searchRad);
@@ -2127,6 +2134,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
         // Scale back: detection coords (480x270) → full-frame coords
         if (d.valid) {
+            // Save det-space object size BEFORE scaling (used for dynamic searchRad)
+            lastObjWDet = std::max(2, d.box_w);
+            lastObjHDet = std::max(2, d.box_h);
             d.x = d.x * scX;
             d.y = d.y * scY;
             d.box_x = (int)(d.box_x * scX);

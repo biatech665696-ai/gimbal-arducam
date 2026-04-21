@@ -1185,12 +1185,13 @@ public:
 
             // Dual-threshold: tight gate → allow small objects (tracking known position).
             // Full-frame search → strict filter (no spatial anchor, noise must be rejected).
-            // Object area 4× smaller → det-space contour ~4px²; gate handles false positives.
-            double minArea    = hasSearchCenter ? 3.0   : 15.0;
+            // minArea 6px² in gate (was 3): reduces noise fragments → noise gate survives.
+            // minArea 10px² full-frame (was 15): allows initial detection of smaller objects.
+            double minArea    = hasSearchCenter ? 6.0   : 10.0;
             double maxArea    = hasSearchCenter ? 800.0 : 1500.0;
             int    minBoxDim  = hasSearchCenter ? 1     : 2;
             int    maxBoxDim  = hasSearchCenter ? 60    : 100;
-            double minSolid   = hasSearchCenter ? 0.10  : 0.20;
+            double minSolid   = hasSearchCenter ? 0.12  : 0.20;
 
             if (!atEdge &&
                 area >= minArea && area <= maxArea &&
@@ -2137,8 +2138,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad < 0 ? 9999.0f : searchRad);
 
-        // Noise gate: >3 objects = noise burst (was 5, tightened to reduce false locks)
-        if ((int)d.all_boxes.size() > 3) {
+        // Noise gate: inside spatial gate allow up to 5 objects (tight zone = fewer background
+        // blobs so 3 was killing real detections when minArea is low).
+        // Full-frame (no history): still >3 to prevent false cold-start locks.
+        int noiseGateLimit = (searchRad < 0) ? 3 : 5;
+        if ((int)d.all_boxes.size() > noiseGateLimit) {
             d.valid = false;
             d.all_boxes.clear();
         }

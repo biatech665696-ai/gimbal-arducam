@@ -2250,20 +2250,28 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         bool scanActive = false;
         static int scanExitCount = 0;  // consecutive valid detections needed to leave scan
         if (scanEnabled.load() && currentTrackingEnabled) {
-            if (d.valid) {
+            // During scan, camera is moving → optical flow mag > 1.5 means FG is likely
+            // background slip-through, not a real object. Suppress exit in that case.
+            cv::Point2f gf = detector.lastGlobalFlow();
+            float gfMag = std::sqrt(gf.x * gf.x + gf.y * gf.y);
+            bool scanMotionBlur = wasScanning && (gfMag > 1.5f);
+
+            if (d.valid && !scanMotionBlur) {
                 scanExitCount++;
-                if (scanExitCount >= 5) {
-                    // Require 5 consecutive valid detections before exiting scan.
+                if (scanExitCount >= 10) {
+                    // Require 10 consecutive valid detections (~0.5s) with camera still
+                    // before exiting scan — prevents chasing background FG blobs.
                     noDetectionSince = std::chrono::steady_clock::now();
                     if (wasScanning) {
-                        std::cout << "[SCAN] Object confirmed (5 consecutive). Switching to tracking." << std::endl;
+                        std::cout << "[SCAN] Object confirmed (10 consecutive, flow=" << gfMag
+                                  << "). Switching to tracking." << std::endl;
                         wasScanning = false;
                         scanExitCount = 0;
                         // Keep scanYawDeg/scanDirection — resume from same spot on next loss
                     }
                 }
             } else {
-                scanExitCount = 0;  // reset on any miss
+                scanExitCount = 0;  // reset on any miss or motion blur
                 auto now = std::chrono::steady_clock::now();
                 double noDetSec = std::chrono::duration<double>(now - noDetectionSince).count();
 

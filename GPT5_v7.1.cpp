@@ -2340,6 +2340,18 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 avgX /= detAvgBuf.size();
                 avgY /= detAvgBuf.size();
             }
+
+            // Velocity feedforward: compensate pipeline delay (~2 frames ≈ 110ms).
+            // Shifts the target toward where the object WILL BE when servo responds.
+            // Only when velocity is stably locked (≥5 consecutive frames stable) to
+            // avoid noise from freshly-computed or object-just-acquired Kalman state.
+            // vx/vy are in px/s; 2/18 ≈ 0.111s look-ahead.
+            if (lockedVel.locked && consecutiveValid >= 5) {
+                const double LATENCY_S = 2.0 / 18.0;
+                avgX += lockedVel.vx * LATENCY_S;
+                avgY += lockedVel.vy * LATENCY_S;
+            }
+
             double ex = avgX - cx;
             double ey = avgY - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
@@ -2356,11 +2368,18 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             prevErrX = filtErrX;
             prevErrY = filtErrY;
 
+            // Soft deadband: compensates servo backlash.
+            // Unlike hard deadband (causes limit cycles), this scales P-correction
+            // proportionally to zero at center, preventing hunting in backlash zone.
+            const double DEADBAND_PX = 10.0;
+            double dbX = (std::abs(filtErrX) < DEADBAND_PX) ? (std::abs(filtErrX) / DEADBAND_PX) : 1.0;
+            double dbY = (std::abs(filtErrY) < DEADBAND_PX) ? (std::abs(filtErrY) / DEADBAND_PX) : 1.0;
+
             // PD controller on filtered error: Kp=0.40, Kd=0.25
             double Kp = 0.40;
             double Kd = 0.25;
-            double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
-            double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
+            double corrYaw   = -(filtErrX * Kp * dbX + dex * Kd) * DEG_PER_PX;
+            double corrPitch = -(filtErrY * Kp * dbY + dey * Kd) * DEG_PER_PX;
             // When confidence is low or freshly re-acquired: limit step to ±0.5°.
             // Prevents single false detection from flinging servo 20°+ across frame.
             double stepLimit = (state.confidence >= 0.5 && consecutiveValid >= 3) ? 2.0 : 0.5;

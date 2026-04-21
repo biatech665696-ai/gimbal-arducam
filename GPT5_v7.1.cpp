@@ -2252,17 +2252,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         bool scanActive = false;
         static int scanExitCount = 0;  // consecutive valid detections needed to leave scan
         if (scanEnabled.load() && currentTrackingEnabled) {
+            // Ignore detections for a few frames after a scan step (servo blur → FG spike)
+            static int scanStepBlind = 0;
+            if (scanStepBlind > 0) { scanStepBlind--; d.valid = false; }
+
             if (d.valid) {
                 scanExitCount++;
-                if (scanExitCount >= 3) {
-                    // Require 3 consecutive valid detections before exiting scan.
-                    // A single noisy MOG2 contour is NOT enough to interrupt sweep.
+                if (scanExitCount >= 5) {
+                    // Require 5 consecutive valid detections before exiting scan.
                     noDetectionSince = std::chrono::steady_clock::now();
                     if (wasScanning) {
-                        std::cout << "[SCAN] Object confirmed (3 consecutive). Switching to tracking." << std::endl;
+                        std::cout << "[SCAN] Object confirmed (5 consecutive). Switching to tracking." << std::endl;
                         wasScanning = false;
                         scanDwelling = false;
                         scanExitCount = 0;
+                        // Keep scanYawDeg/scanDirection — resume from same spot on next loss
                     }
                 }
             } else {
@@ -2276,11 +2280,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
                     if (!wasScanning) {
                         wasScanning = true;
-                        scanYawDeg = 0.0;
-                        scanDirection = 1;
+                        // Do NOT reset scanYawDeg/scanDirection — continue from last position
                         scanDwelling = true;
                         scanStepTime = now;
-                        std::cout << "[SCAN] Starting sweep at 0 deg (dir=1)" << std::endl;
+                        std::cout << "[SCAN] Resuming sweep at " << scanYawDeg
+                                  << " deg (dir=" << scanDirection << ")" << std::endl;
                     }
 
                     double dwellElapsed = std::chrono::duration<double>(now - scanStepTime).count();
@@ -2289,6 +2293,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                         if (scanYawDeg >= 180.0) { scanYawDeg = 180.0; scanDirection = -1; }
                         else if (scanYawDeg <= 0.0) { scanYawDeg = 0.0; scanDirection = 1; }
                         scanStepTime = now;
+                        scanStepBlind = 3;  // ignore 3 frames after step (servo motion blur)
                         std::cout << "[SCAN] Step -> " << scanYawDeg
                                   << " deg (dir=" << scanDirection << ")" << std::endl;
                     }

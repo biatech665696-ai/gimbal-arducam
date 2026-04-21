@@ -2057,11 +2057,18 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             resetSpatialGating = false;
         }
         cv::Point2f searchPt(-1, -1);
-        float searchRad = 80.0f;  // 80px in det space = 320px full-frame (wider to survive brief losses)
-        if (lastKnownX >= 0) {
+        // Gate radius grows with time-without-detection but NEVER opens to full frame.
+        // Full-frame search grabs random contours → false lock → servo crash.
+        float searchRad;
+        if (lastKnownX < 0) {
+            // No history at all (startup / mode switch) — only then use full frame
+            searchRad = -1;  // -1 signals full frame inside detect()
+        } else {
+            // Known position: radius grows 4px/frame, capped at 240px det-space (≈960px full)
+            searchRad = std::min(80.0f + framesWithoutDetection * 4.0f, 240.0f);
             searchPt = cv::Point2f((float)(lastKnownX / scX), (float)(lastKnownY / scY));
         }
-        Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad);
+        Detection d = detector.detect(resized, 0, 0, 0.0, searchPt, searchRad < 0 ? 9999.0f : searchRad);
 
         // Noise gate: >3 objects = noise burst (was 5, tightened to reduce false locks)
         if ((int)d.all_boxes.size() > 3) {
@@ -2251,11 +2258,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (d.valid) {
             lastKnownX = d.x;
             lastKnownY = d.y;
-        } else if (framesWithoutDetection > 90) {
-            // Lost object completely (~6 sec) — reset spatial gating, allow full-frame search
-            lastKnownX = -1;
-            lastKnownY = -1;
         }
+        // Never reset lastKnownX to -1: full-frame search causes false locks.
+        // Instead the radius grows with framesWithoutDetection (capped at 240px det-space).
+        // lastKnownX is only reset on explicit mode switch (resetSpatialGating above).
         // Remember servo angles BEFORE this frame's correction for spatial gate compensation
         double preFrameYaw = lastYawDeg;
         double preFramePitch = lastPitchDeg;
@@ -2306,8 +2312,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double Kd = 0.25;
             double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
             double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
-            corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
-            corrPitch = std::clamp(corrPitch, -2.0, 2.0);
+            // When confidence is low or freshly re-acquired: limit step to ±0.5°.
+            // Prevents single false detection from flinging servo 20°+ across frame.
+            double stepLimit = (state.confidence >= 0.5 && consecutiveValid >= 3) ? 2.0 : 0.5;
+            corrYaw   = std::clamp(corrYaw,   -stepLimit, stepLimit);
+            corrPitch = std::clamp(corrPitch, -stepLimit, stepLimit);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 

@@ -2585,7 +2585,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                      cv::Scalar(0, 255, 255), 2);
         
         // File + commit label (first line) - RED
-        cv::putText(display, "GPT5_v5.cpp | bcf5c61", cv::Point(10, 30), 
+        cv::putText(display, "GPT5_v7.1", cv::Point(10, 30), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
         
         cv::putText(display, info.str(), cv::Point(10, 55), 
@@ -2618,9 +2618,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 "F - Track / Fixed",
                 "S - Scan on/off",
                 "T - Trajectory on/off",
+                "R - Fire reset (GPIO26)",
+                "Click - Aim + fire",
                 "Q - Quit"
             };
-            const int nLines = 4;
+            const int nLines = 6;
             const double fontScale = 0.65;
             const int thickness = 2;
             const int lineH = 28;

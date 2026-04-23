@@ -2297,16 +2297,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             framesWithoutDetection = 0;
             detAvgBuf.push_back({d.x, d.y});
             if ((int)detAvgBuf.size() > 3) detAvgBuf.pop_front();
-            // Prime prevErr from filtErr on first detection after loss so D-term
-            // starts at ~0 on the first servo step — prevents the ramp-from-zero
-            // D-spike that caused abrupt lurch toward target on mode switch / reacquisition.
-            if (consecutiveValid == 1) {
-                double ex0 = d.x - cx, ey0 = d.y - cy;
-                filtErrX = 0.4 * ex0 + 0.6 * filtErrX;
-                filtErrY = 0.4 * ey0 + 0.6 * filtErrY;
-                prevErrX = filtErrX;
-                prevErrY = filtErrY;
-            }
         } else {
             consecutiveValid = 0;
             framesWithoutDetection++;

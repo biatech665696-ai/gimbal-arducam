@@ -255,6 +255,11 @@ std::atomic<double> remoteNudgeYaw(0.0);
 std::atomic<double> remoteNudgePitch(0.0);
 const double NUDGE_STEP = 3.0;  // degrees per arrow press
 
+// Keyboard arrow key manual control (Fixed mode)
+std::atomic<double> manualYawDeg(90.0);    // current manual yaw target
+std::atomic<double> manualPitchDeg(90.0);  // current manual pitch target
+const double MANUAL_STEP = 3.0;  // degrees per arrow key press
+
 // Remote mouse click (click on stream to set target)
 std::atomic<int> remoteMouseEvent(0);  // 1=down, 2=move, 3=up
 std::atomic<int> remoteMouseX(-1);
@@ -2014,11 +2019,15 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 std::cout << ">>> FIXED MODE ACTIVATED <<<" << std::endl;
+                manualYawDeg.store(90.0);
+                manualPitchDeg.store(90.0);
             }
-            setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
-            setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
-            lastYawDeg   = 90.0;
-            lastPitchDeg = 90.0;
+            double myaw   = manualYawDeg.load();
+            double mpitch = manualPitchDeg.load();
+            setServoAngle(PWM_CHANNEL_HORIZONTAL, (float)myaw);
+            setServoAngle(PWM_CHANNEL_VERTICAL,   (float)mpitch);
+            lastYawDeg   = myaw;
+            lastPitchDeg = mpitch;
         }
 
         // При переключении FIXED → TRACKING: reset all components
@@ -2758,15 +2767,38 @@ int main()
                 // накопленную ошибку из FIXED-режима
                 std::cout << ">>> TRACKING MODE ENABLED - Servos will follow detected objects <<<" << std::endl;
             } else {
-                std::cout << ">>> FIXED MODE - Servos locked at 90°, 90° <<<" << std::endl;
-                std::cout << ">>> IMMEDIATE CENTERING (no delays)... <<<" << std::endl;
+                std::cout << ">>> FIXED MODE - Servos centered at 90°, 90°. Use arrows to scan. <<<" << std::endl;
+                manualYawDeg.store(90.0);
+                manualPitchDeg.store(90.0);
                 // Send commands WITHOUT delays for instant response
                 for (int i = 0; i < 10; i++) {
                     setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
                     setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
-                    // NO SLEEP - instant burst!
                 }
-                std::cout << ">>> 10x instant commands sent! <<<" << std::endl;
+            }
+        } else if (key == 65361) {  // Left arrow — pan left (yaw+)
+            if (!trackingEnabled.load()) {
+                double v = std::clamp(manualYawDeg.load() + MANUAL_STEP, 5.0, 175.0);
+                manualYawDeg.store(v);
+                std::cout << ">>> LEFT: yaw=" << v << "° <<<" << std::endl;
+            }
+        } else if (key == 65363) {  // Right arrow — pan right (yaw-)
+            if (!trackingEnabled.load()) {
+                double v = std::clamp(manualYawDeg.load() - MANUAL_STEP, 5.0, 175.0);
+                manualYawDeg.store(v);
+                std::cout << ">>> RIGHT: yaw=" << v << "° <<<" << std::endl;
+            }
+        } else if (key == 65362) {  // Up arrow — tilt up (pitch-)
+            if (!trackingEnabled.load()) {
+                double v = std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0);
+                manualPitchDeg.store(v);
+                std::cout << ">>> UP: pitch=" << v << "° <<<" << std::endl;
+            }
+        } else if (key == 65364) {  // Down arrow — tilt down (pitch+)
+            if (!trackingEnabled.load()) {
+                double v = std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0);
+                manualPitchDeg.store(v);
+                std::cout << ">>> DOWN: pitch=" << v << "° <<<" << std::endl;
             }
         }
     }

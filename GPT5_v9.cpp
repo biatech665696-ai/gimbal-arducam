@@ -258,7 +258,7 @@ const double NUDGE_STEP = 3.0;  // degrees per arrow press
 // Keyboard arrow key manual control (Fixed mode)
 std::atomic<double> manualYawDeg(90.0);    // current manual yaw target
 std::atomic<double> manualPitchDeg(90.0);  // current manual pitch target
-const double MANUAL_STEP = 3.0;  // degrees per arrow key press
+const double MANUAL_STEP = 1.0;  // degrees per arrow key press
 
 // Remote mouse click (click on stream to set target)
 std::atomic<int> remoteMouseEvent(0);  // 1=down, 2=move, 3=up

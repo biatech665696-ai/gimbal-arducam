@@ -265,6 +265,62 @@ std::atomic<double> manualYawDeg(90.0);
 std::atomic<double> manualPitchDeg(90.0);
 std::atomic<bool>   manualMoveReq(false);
 
+// Background keyboard reader thread
+std::atomic<int>  pendingKbdKey(-1);   // key code written by thread, read by main loop
+std::atomic<bool> kbdStop(false);      // set to true to stop the thread
+pthread_t         kbdPthread;
+static termios    kbdOrigTerm;
+static bool       kbdTermSaved = false;
+
+static void* kbdReaderThreadFn(void*) {
+    // Put stdin in raw non-blocking mode
+    if (!isatty(STDIN_FILENO)) return nullptr;
+    if (tcgetattr(STDIN_FILENO, &kbdOrigTerm) != 0) return nullptr;
+    kbdTermSaved = true;
+    termios raw = kbdOrigTerm;
+    raw.c_lflag &= static_cast<unsigned long>(~(ICANON | ECHO));
+    raw.c_cc[VMIN]  = 0;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+
+    // Helper: blocking read with timeout
+    auto readByte = [](unsigned char& out, int timeoutMs) -> bool {
+        fd_set rfd;
+        FD_ZERO(&rfd);
+        FD_SET(STDIN_FILENO, &rfd);
+        timeval t{ timeoutMs / 1000, (timeoutMs % 1000) * 1000 };
+        if (select(STDIN_FILENO + 1, &rfd, nullptr, nullptr, &t) <= 0) return false;
+        return read(STDIN_FILENO, &out, 1) == 1;
+    };
+
+    while (!kbdStop.load()) {
+        unsigned char ch = 0;
+        if (!readByte(ch, 100)) continue;  // 100ms poll so we can exit on kbdStop
+
+        int code = static_cast<int>(ch);
+        if (ch == 27) {  // possible ESC-sequence (arrow key)
+            unsigned char b2 = 0, b3 = 0;
+            bool got2 = readByte(b2, 50);
+            bool got3 = got2 && b2 == '[' && readByte(b3, 50);
+            if (got3) {
+                switch (b3) {
+                    case 'A': code = KEY_ARROW_UP;    break;
+                    case 'B': code = KEY_ARROW_DOWN;  break;
+                    case 'C': code = KEY_ARROW_RIGHT; break;
+                    case 'D': code = KEY_ARROW_LEFT;  break;
+                    default:  code = 27;               break;
+                }
+            } else {
+                code = 27;
+            }
+        }
+        pendingKbdKey.store(code);
+    }
+
+    if (kbdTermSaved) tcsetattr(STDIN_FILENO, TCSANOW, &kbdOrigTerm);
+    return nullptr;
+}
+
 // Remote mouse click (click on stream to set target)
 std::atomic<int> remoteMouseEvent(0);  // 1=down, 2=move, 3=up
 std::atomic<int> remoteMouseX(-1);
@@ -281,78 +337,6 @@ cv::Mat streamFrame;
 std::mutex streamMutex;
 const int STREAM_PORT = 8080;
 pthread_t streamThread;
-
-class TerminalKeyboardMode {
-public:
-    TerminalKeyboardMode() {
-        enabled_ = false;
-        if (!isatty(STDIN_FILENO)) return;
-        if (tcgetpgrp(STDIN_FILENO) != getpgrp()) return;
-        if (tcgetattr(STDIN_FILENO, &original_) != 0) return;
-
-        termios raw = original_;
-        raw.c_lflag &= static_cast<unsigned long>(~(ICANON | ECHO));
-        raw.c_cc[VMIN] = 0;
-        raw.c_cc[VTIME] = 0;
-        if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == 0) {
-            enabled_ = true;
-        }
-    }
-
-    ~TerminalKeyboardMode() {
-        if (enabled_) {
-            tcsetattr(STDIN_FILENO, TCSANOW, &original_);
-        }
-    }
-
-    bool enabled() const { return enabled_; }
-
-private:
-    termios original_{};
-    bool enabled_;
-};
-
-static int pollTerminalKey() {
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(STDIN_FILENO, &readfds);
-
-    timeval tv{};
-    tv.tv_sec = 0;
-    tv.tv_usec = 0;
-
-    int ready = select(STDIN_FILENO + 1, &readfds, nullptr, nullptr, &tv);
-    if (ready <= 0 || !FD_ISSET(STDIN_FILENO, &readfds)) {
-        return -1;
-    }
-
-    unsigned char ch = 0;
-    ssize_t n = read(STDIN_FILENO, &ch, 1);
-    if (n != 1) return -1;
-
-    if (ch != 27) return static_cast<int>(ch);
-
-    // ESC received — try to read arrow key sequence: ESC [ A/B/C/D
-    auto tryReadByte = [&](unsigned char& out) -> bool {
-        fd_set rfd;
-        FD_ZERO(&rfd);
-        FD_SET(STDIN_FILENO, &rfd);
-        timeval t{ 0, 50000 };  // 50ms timeout
-        if (select(STDIN_FILENO + 1, &rfd, nullptr, nullptr, &t) <= 0) return false;
-        return read(STDIN_FILENO, &out, 1) == 1;
-    };
-
-    unsigned char b2 = 0, b3 = 0;
-    if (!tryReadByte(b2) || b2 != '[') return 27;
-    if (!tryReadByte(b3)) return 27;
-    switch (b3) {
-        case 'A': return KEY_ARROW_UP;
-        case 'B': return KEY_ARROW_DOWN;
-        case 'C': return KEY_ARROW_RIGHT;
-        case 'D': return KEY_ARROW_LEFT;
-    }
-    return 27;
-}
 
 // Per-connection MJPEG client handler
 static void* handleHttpClient(void* arg) {
@@ -2781,10 +2765,10 @@ int main()
     // уводили серво в потолок. Прицеливание только через веб-браузер.
     std::cout << "\n*** Click on web stream to aim & fire. R to reset fire. ***\n" << std::endl;
 
-    TerminalKeyboardMode terminalKeyboard;
-    if (terminalKeyboard.enabled()) {
-        std::cout << "*** TERMINAL KEYBOARD ENABLED: F/S/T/Q/ESC work from Raspberry Pi terminal ***" << std::endl;
-    }
+    // Start background keyboard reader thread
+    kbdStop.store(false);
+    pthread_create(&kbdPthread, nullptr, kbdReaderThreadFn, nullptr);
+    std::cout << "*** KEYBOARD THREAD STARTED: arrows/F/S/T/Q/ESC from terminal ***" << std::endl;
 
     // Start HTTP MJPEG stream server
     streamRunning = true;
@@ -2812,12 +2796,16 @@ int main()
             }
         }
         
-        // Check for key press from either the OpenCV window or the terminal.
-        int key = cv::waitKey(1);
-        if (key == -1 && terminalKeyboard.enabled()) {
-            key = pollTerminalKey();
-        }
-        if (key != -1) {  // If any key was pressed
+        // Check for key press: OpenCV window (waitKeyEx) OR terminal thread
+        int key = cv::waitKeyEx(1);
+        // Map OpenCV extended arrow codes to our constants
+        if      (key == 65361) key = KEY_ARROW_LEFT;
+        else if (key == 65363) key = KEY_ARROW_RIGHT;
+        else if (key == 65362) key = KEY_ARROW_UP;
+        else if (key == 65364) key = KEY_ARROW_DOWN;
+        // Fall back to terminal thread if OpenCV window had no event
+        if (key == -1) key = pendingKbdKey.exchange(-1);
+        if (key != -1) {
             std::cout << "\n[KEY DETECTED] Code: " << key << " (char: '" << (char)key << "')" << std::endl;
         }
         
@@ -2899,6 +2887,8 @@ int main()
     }
 
     std::cout << "\nShutting down..." << std::endl;
+    kbdStop.store(true);
+    pthread_join(kbdPthread, nullptr);
     run=false;
     queue.notifyAll();
 

@@ -2080,11 +2080,21 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 std::cout << ">>> FIXED MODE ACTIVATED <<<" << std::endl;
+                // Only reset servo when first entering FIXED mode
+                setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
+                setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
+                lastYawDeg   = 90.0;
+                lastPitchDeg = 90.0;
+                manualYawDeg.store(90.0);
+                manualPitchDeg.store(90.0);
+                manualMoveReq.store(false);
+            } else {
+                // Sync display position from arrow-key moves (main thread already sent servo command)
+                if (manualMoveReq.exchange(false)) {
+                    lastYawDeg   = manualYawDeg.load();
+                    lastPitchDeg = manualPitchDeg.load();
+                }
             }
-            setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
-            setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
-            lastYawDeg   = 90.0;
-            lastPitchDeg = 90.0;
         }
 
         // При переключении FIXED → TRACKING: reset all components
@@ -2414,12 +2424,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 lastYawDeg   = newYaw;
                 lastPitchDeg = newPitch;
             }
-        }
-
-        // Sync lastYaw/Pitch from manual arrow-key moves (main thread commanded servo directly)
-        if (manualMoveReq.exchange(false)) {
-            lastYawDeg   = manualYawDeg.load();
-            lastPitchDeg = manualPitchDeg.load();
         }
 
         // No coast servo — servo holds last position when object is lost.

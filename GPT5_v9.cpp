@@ -2042,10 +2042,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cx = f.frame.cols / 2.0;
         cy = f.frame.rows / 2.0;
 
-        // === PROCESS LOCAL MOUSE CLICK → AIM SERVO (только в TRACKING режиме) ===
+        // === PROCESS LOCAL MOUSE CLICK → AIM SERVO ===
         {
             int lev = localMouseEvent.exchange(0);
-            if (lev == 1 && trackingEnabled.load()) {
+            if (lev == 1) {
                 int lx = localMouseX.load();
                 int ly = localMouseY.load();
                 if (lx >= 0 && ly >= 0) {
@@ -2055,10 +2055,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 }
             }
         }
-        // === PROCESS REMOTE MOUSE CLICK → AIM SERVO (только в TRACKING режиме) ===
+        // === PROCESS REMOTE MOUSE CLICK → AIM SERVO ===
         {
             int ev = remoteMouseEvent.exchange(0);
-            if (ev == 1 && trackingEnabled.load()) {  // mousedown — aim immediately
+            if (ev == 1) {  // mousedown — aim immediately
                 int rmX = remoteMouseX.load();
                 int rmY = remoteMouseY.load();
                 if (rmX >= 0 && rmY >= 0) {
@@ -2418,10 +2418,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
-        // Apply remote nudge even when no detection (manual servo control from web UI)
+        // Apply remote nudge once when no detection, then reset to 0 (web UI arrow buttons)
         {
-            double ny = remoteNudgeYaw.load();
-            double np = remoteNudgePitch.load();
+            double ny = remoteNudgeYaw.exchange(0.0);
+            double np = remoteNudgePitch.exchange(0.0);
             if (ny != 0.0 || np != 0.0) {
                 double newYaw   = std::clamp(lastYawDeg   + ny, 5.0, 175.0);
                 double newPitch = std::clamp(lastPitchDeg + np, 5.0, 175.0);
@@ -2777,18 +2777,9 @@ int main()
     cv::moveWindow("Predictive Gimbal Control", 100, 50);
     cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
     // Local mouse click callback — coordinates in display space (1280x720)
-    cv::setMouseCallback("Predictive Gimbal Control", [](int event, int x, int y, int /*flags*/, void* /*userdata*/) {
-        if (event == cv::EVENT_LBUTTONDOWN) {
-            // Convert display 1280x720 -> stream 1600x900 (same ratio as remote)
-            int sx = (int)(x * (1600.0 / 1280.0));
-            int sy = (int)(y * (900.0 / 720.0));
-            localMouseX.store(sx);
-            localMouseY.store(sy);
-            localMouseEvent.store(1);
-            std::cout << "[LOCAL CLICK] display(" << x << "," << y << ") -> stream(" << sx << "," << sy << ")" << std::endl;
-        }
-    });
-    std::cout << "\n*** CLICK ON THE WINDOW TO AIM & FIRE, R TO RESET ***\n" << std::endl;
+    // LOCAL CLICK по OpenCV-окну отключён — случайные клики на физическом дисплее
+    // уводили серво в потолок. Прицеливание только через веб-браузер.
+    std::cout << "\n*** Click on web stream to aim & fire. R to reset fire. ***\n" << std::endl;
 
     TerminalKeyboardMode terminalKeyboard;
     if (terminalKeyboard.enabled()) {

@@ -259,6 +259,9 @@ const double NUDGE_STEP = 3.0;  // degrees per arrow press
 std::atomic<double> manualYawDeg(90.0);    // current manual yaw target
 std::atomic<double> manualPitchDeg(90.0);  // current manual pitch target
 const double MANUAL_STEP = 1.0;  // degrees per arrow key press
+std::atomic<double> currentServoYaw(90.0);   // actual servo position, shared with HTTP thread
+std::atomic<double> currentServoPitch(90.0);
+std::atomic<bool>   remoteStop(false);       // STOP: freeze at current pos, skip 90° reset
 
 // Remote mouse click (click on stream to set target)
 std::atomic<int> remoteMouseEvent(0);  // 1=down, 2=move, 3=up
@@ -396,6 +399,14 @@ static void* handleHttpClient(void* arg) {
             } else {
                 remoteNudgeYaw.store(remoteNudgeYaw.load() - NUDGE_STEP);
             }
+        } else if (cmd == "stop") {
+            remoteStop.store(true);
+            manualYawDeg.store(currentServoYaw.load());
+            manualPitchDeg.store(currentServoPitch.load());
+            scanEnabled.store(false);
+            trackingEnabled.store(false);
+            std::cout << "\n[REMOTE] STOP - freeze at yaw=" << currentServoYaw.load()
+                      << " pitch=" << currentServoPitch.load() << std::endl;
         } else if (cmd == "center") {
             remoteNudgeYaw.store(0.0);
             remoteNudgePitch.store(0.0);
@@ -496,7 +507,7 @@ static void* handleHttpClient(void* arg) {
             "<button ontouchstart='e_touch(event,\"up\")' onmousedown='sendCmd(\"up\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8593;</button>"
             "<div></div>"
             "<button ontouchstart='e_touch(event,\"left\")' onmousedown='sendCmd(\"left\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8592;</button>"
-            "<div style='background:rgba(0,0,0,0.3);border-radius:50%;border:2px solid #666'></div>"
+            "<button ontouchstart='e_touch(event,\"stop\")' onmousedown='sendCmd(\"stop\")' style='font-size:15px;font-weight:bold;background:rgba(180,0,0,0.75);color:#fff;border:2px solid #f66;border-radius:8px;cursor:pointer'>&#9632;</button>"
             "<button ontouchstart='e_touch(event,\"right\")' onmousedown='sendCmd(\"right\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8594;</button>"
             "<div></div>"
             "<button ontouchstart='e_touch(event,\"down\")' onmousedown='sendCmd(\"down\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8595;</button>"
@@ -2050,8 +2061,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 std::cout << ">>> FIXED MODE ACTIVATED <<<" << std::endl;
-                manualYawDeg.store(90.0);
-                manualPitchDeg.store(90.0);
+                if (!remoteStop.load()) {
+                    manualYawDeg.store(90.0);
+                    manualPitchDeg.store(90.0);
+                }
+                remoteStop.store(false);
             }
             double myaw   = manualYawDeg.load();
             double mpitch = manualPitchDeg.load();
@@ -2059,6 +2073,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             setServoAngle(PWM_CHANNEL_VERTICAL,   (float)mpitch);
             lastYawDeg   = myaw;
             lastPitchDeg = mpitch;
+            currentServoYaw.store(myaw);
+            currentServoPitch.store(mpitch);
         }
 
         // При переключении FIXED → TRACKING: reset all components
@@ -2377,6 +2393,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
+            currentServoYaw.store(yawDeg);
+            currentServoPitch.store(pitchDeg);
             servoSettleCounter = 0;  // correct every frame
             // No notifyServoMove: lr=0 freeze during motion handles this better.
             // Warmup boosted lr=0.5 which absorbed the target into background.

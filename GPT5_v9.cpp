@@ -2737,7 +2737,7 @@ int main()
             }
         }
         
-        int key = cv::waitKey(1);
+        int key = cv::waitKeyEx(1);
         if (key == 'q' || key == 'Q' || key == 27 || remoteQuit.load()) {  // Q or ESC - quit (local or remote)
             std::cout << "\n=== QUIT " << (remoteQuit.load() ? "(REMOTE)" : "(LOCAL)") << " ===" << std::endl;
             run = false;

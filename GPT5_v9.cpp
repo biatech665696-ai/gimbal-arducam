@@ -2538,14 +2538,14 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         int cy_int = display.rows / 2;
         const cv::Scalar BLACK(0, 0, 0);
         const cv::Scalar WHITE(255, 255, 255);
-        // Outer ring + inner ring (white outline, black fill ring)
-        cv::circle(display, cv::Point(cx_int, cy_int), 30, WHITE, 3);
-        cv::circle(display, cv::Point(cx_int, cy_int), 30, BLACK, 1);
-        cv::circle(display, cv::Point(cx_int, cy_int), 12, WHITE, 3);
-        cv::circle(display, cv::Point(cx_int, cy_int), 12, BLACK, 1);
-        cv::circle(display, cv::Point(cx_int, cy_int),  3, BLACK, -1);
-        // Crosshair lines (gap in center)
-        const int GAP = 5, LEN = 28;
+        // Outer ring + inner ring (white outline, black fill ring) — 2x size
+        cv::circle(display, cv::Point(cx_int, cy_int), 60, WHITE, 3);
+        cv::circle(display, cv::Point(cx_int, cy_int), 60, BLACK, 1);
+        cv::circle(display, cv::Point(cx_int, cy_int), 24, WHITE, 3);
+        cv::circle(display, cv::Point(cx_int, cy_int), 24, BLACK, 1);
+        cv::circle(display, cv::Point(cx_int, cy_int),  6, BLACK, -1);
+        // Crosshair lines (gap in center) — 2x size
+        const int GAP = 10, LEN = 56;
         cv::line(display, cv::Point(cx_int - LEN, cy_int), cv::Point(cx_int - GAP, cy_int), BLACK, 3);
         cv::line(display, cv::Point(cx_int + GAP, cy_int), cv::Point(cx_int + LEN, cy_int), BLACK, 3);
         cv::line(display, cv::Point(cx_int, cy_int - LEN), cv::Point(cx_int, cy_int - GAP), BLACK, 3);

@@ -2533,13 +2533,23 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     cv::Scalar(255, 0, 0), 2);
         }
         
-        // Draw center crosshair (use actual frame dimensions, not constants)
+        // Draw center crosshair as a black target reticle
         int cx_int = display.cols / 2;
         int cy_int = display.rows / 2;
-        cv::line(display, cv::Point(cx_int - 20, cy_int), cv::Point(cx_int + 20, cy_int), 
-                cv::Scalar(255, 255, 0), 2);
-        cv::line(display, cv::Point(cx_int, cy_int - 20), cv::Point(cx_int, cy_int + 20), 
-                cv::Scalar(255, 255, 0), 2);
+        const cv::Scalar BLACK(0, 0, 0);
+        const cv::Scalar WHITE(255, 255, 255);
+        // Outer ring + inner ring (white outline, black fill ring)
+        cv::circle(display, cv::Point(cx_int, cy_int), 30, WHITE, 3);
+        cv::circle(display, cv::Point(cx_int, cy_int), 30, BLACK, 1);
+        cv::circle(display, cv::Point(cx_int, cy_int), 12, WHITE, 3);
+        cv::circle(display, cv::Point(cx_int, cy_int), 12, BLACK, 1);
+        cv::circle(display, cv::Point(cx_int, cy_int),  3, BLACK, -1);
+        // Crosshair lines (gap in center)
+        const int GAP = 5, LEN = 28;
+        cv::line(display, cv::Point(cx_int - LEN, cy_int), cv::Point(cx_int - GAP, cy_int), BLACK, 3);
+        cv::line(display, cv::Point(cx_int + GAP, cy_int), cv::Point(cx_int + LEN, cy_int), BLACK, 3);
+        cv::line(display, cv::Point(cx_int, cy_int - LEN), cv::Point(cx_int, cy_int - GAP), BLACK, 3);
+        cv::line(display, cv::Point(cx_int, cy_int + GAP), cv::Point(cx_int, cy_int + LEN), BLACK, 3);
         
         // Draw info text with background for better visibility
         std::ostringstream info;

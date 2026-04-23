@@ -1947,7 +1947,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
 
     // === SCAN MODE STATE ===
-    double scanYawDeg = 0.0;              // Current scan position
+    double scanYawDeg = -1.0;             // Current scan position (-1 = not yet started)
     int scanDirection = 1;                // 1 = forward (0→180), -1 = backward (180→0)
     const double SCAN_STEP = 30.0;        // Degrees per step
     const double SCAN_DWELL_SEC = 1.0;    // Seconds to dwell at each position
@@ -2229,11 +2229,18 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
 
                     if (!wasScanning) {
                         wasScanning = true;
-                        scanYawDeg = 90.0;
-                        scanDirection = 1;
                         scanDwelling = true;
                         scanStepTime = now;
-                        std::cout << "[SCAN] Starting sweep at 90 deg (dir=1)" << std::endl;
+                        // First-ever scan or resume after tracking: start from current servo position.
+                        // Do NOT reset to 90 — that caused scan to always repeat 90→180 loop.
+                        if (scanYawDeg < 0.0) {
+                            // Very first start
+                            scanYawDeg = lastYawDeg;
+                            scanDirection = (lastYawDeg <= 90.0) ? 1 : -1;
+                        }
+                        // else: resume from last scanYawDeg + scanDirection (bidirectional)
+                        std::cout << "[SCAN] Starting sweep at " << scanYawDeg
+                                  << " deg (dir=" << scanDirection << ")" << std::endl;
                     }
 
                     double dwellElapsed = std::chrono::duration<double>(now - scanStepTime).count();

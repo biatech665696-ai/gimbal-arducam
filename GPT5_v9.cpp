@@ -2042,10 +2042,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cx = f.frame.cols / 2.0;
         cy = f.frame.rows / 2.0;
 
-        // === PROCESS LOCAL MOUSE CLICK → AIM SERVO ===
+        // === PROCESS LOCAL MOUSE CLICK → AIM SERVO (только в TRACKING режиме) ===
         {
             int lev = localMouseEvent.exchange(0);
-            if (lev == 1) {
+            if (lev == 1 && trackingEnabled.load()) {
                 int lx = localMouseX.load();
                 int ly = localMouseY.load();
                 if (lx >= 0 && ly >= 0) {
@@ -2055,10 +2055,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 }
             }
         }
-        // === PROCESS REMOTE MOUSE CLICK → AIM SERVO ===
+        // === PROCESS REMOTE MOUSE CLICK → AIM SERVO (только в TRACKING режиме) ===
         {
             int ev = remoteMouseEvent.exchange(0);
-            if (ev == 1) {  // mousedown — aim immediately
+            if (ev == 1 && trackingEnabled.load()) {  // mousedown — aim immediately
                 int rmX = remoteMouseX.load();
                 int rmY = remoteMouseY.load();
                 if (rmX >= 0 && rmY >= 0) {

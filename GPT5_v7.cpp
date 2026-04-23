@@ -2111,9 +2111,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         static int framesWithoutDetection = 0;  // for return-to-center
         static double prevErrX = 0, prevErrY = 0;  // for PD controller D-term
         static double filtErrX = 0, filtErrY = 0;  // EMA-filtered error
-        static int framesAfterModeSwitch = 999;  // frames since FIXED->TRACKING switch
-        if (modeJustChanged && currentTrackingEnabled) framesAfterModeSwitch = 0;
-        else if (framesAfterModeSwitch < 999) framesAfterModeSwitch++;
         // Rolling 3-frame detection average: smooths centroid jitter (±40px)
         // without adding lag — window is short enough to follow moving objects.
         static std::deque<cv::Point2d> detAvgBuf;
@@ -2353,15 +2350,6 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double ey = avgY - cy;
             const double DEG_PER_PX = 72.0 / 1920.0 * 1.05;
 
-            // On first servo command after FIXED→TRACKING: warm-start EMA to current
-            // error so it doesn't start from zero and lurch at full speed.
-            if (framesAfterModeSwitch <= 1 && filtErrX == 0 && filtErrY == 0) {
-                filtErrX = ex;
-                filtErrY = ey;
-                prevErrX = ex;
-                prevErrY = ey;
-            }
-
             // EMA filter on error: smooth out measurement noise + break feedback oscillation
             // alpha=0.4 → ~60% of previous, delays response ~1 frame but kills oscillation
             const double ALPHA = 0.4;
@@ -2379,10 +2367,8 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             double Kd = 0.25;
             double corrYaw   = -(filtErrX * Kp + dex * Kd) * DEG_PER_PX;
             double corrPitch = -(filtErrY * Kp + dey * Kd) * DEG_PER_PX;
-            // Smooth approach: limit step to 0.5°/frame for 20 frames after mode switch
-            double slewMax = (framesAfterModeSwitch < 20) ? 0.5 : 2.0;
-            corrYaw   = std::clamp(corrYaw,   -slewMax, slewMax);
-            corrPitch = std::clamp(corrPitch, -slewMax, slewMax);
+            corrYaw   = std::clamp(corrYaw,   -2.0, 2.0);
+            corrPitch = std::clamp(corrPitch, -2.0, 2.0);
             yawDeg   = std::clamp(lastYawDeg   + corrYaw,   5.0, 175.0);
             pitchDeg = std::clamp(lastPitchDeg + corrPitch, 5.0, 175.0);
 

@@ -2768,13 +2768,46 @@ int main()
     // Local mouse click callback — coordinates in display space (1280x720)
     cv::setMouseCallback("Predictive Gimbal Control", [](int event, int x, int y, int /*flags*/, void* /*userdata*/) {
         if (event == cv::EVENT_LBUTTONDOWN) {
-            // Convert display 1280x720 -> stream 1600x900 (same ratio as remote)
-            int sx = (int)(x * (1600.0 / 1280.0));
-            int sy = (int)(y * (900.0 / 720.0));
-            localMouseX.store(sx);
-            localMouseY.store(sy);
-            localMouseEvent.store(1);
-            std::cout << "[LOCAL CLICK] display(" << x << "," << y << ") -> stream(" << sx << "," << sy << ")" << std::endl;
+            // D-pad geometry (must match drawing code): BTN=56, GAP=6, STEP=62, GX=18, GY=522
+            // col/row → x=[GX+col*STEP .. +BTN], y=[GY+row*STEP .. +BTN]
+            constexpr int BTN=56, STEP=62, GX=18, GY=522;
+            auto inBtn = [&](int col, int row) {
+                int bx = GX + col*STEP, by = GY + row*STEP;
+                return x >= bx && x < bx+BTN && y >= by && y < by+BTN;
+            };
+            if (inBtn(1,0)) { // UP
+                if (!trackingEnabled.load())
+                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
+                std::cout << "[LOCAL PAD] UP" << std::endl;
+            } else if (inBtn(1,2)) { // DOWN
+                if (!trackingEnabled.load())
+                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0));
+                std::cout << "[LOCAL PAD] DOWN" << std::endl;
+            } else if (inBtn(0,1)) { // LEFT
+                if (!trackingEnabled.load())
+                    manualYawDeg.store(std::clamp(manualYawDeg.load() + MANUAL_STEP, 5.0, 175.0));
+                std::cout << "[LOCAL PAD] LEFT" << std::endl;
+            } else if (inBtn(2,1)) { // RIGHT
+                if (!trackingEnabled.load())
+                    manualYawDeg.store(std::clamp(manualYawDeg.load() - MANUAL_STEP, 5.0, 175.0));
+                std::cout << "[LOCAL PAD] RIGHT" << std::endl;
+            } else if (inBtn(1,1)) { // STOP
+                remoteStop.store(true);
+                manualYawDeg.store(currentServoYaw.load());
+                manualPitchDeg.store(currentServoPitch.load());
+                scanEnabled.store(false);
+                trackingEnabled.store(false);
+                std::cout << "[LOCAL PAD] STOP yaw=" << currentServoYaw.load()
+                          << " pitch=" << currentServoPitch.load() << std::endl;
+            } else {
+                // Outside D-pad: aim & fire
+                int sx = (int)(x * (1600.0 / 1280.0));
+                int sy = (int)(y * (900.0 / 720.0));
+                localMouseX.store(sx);
+                localMouseY.store(sy);
+                localMouseEvent.store(1);
+                std::cout << "[LOCAL CLICK] display(" << x << "," << y << ") -> stream(" << sx << "," << sy << ")" << std::endl;
+            }
         }
     });
     std::cout << "\n*** CLICK ON THE WINDOW TO AIM & FIRE, R TO RESET ***\n" << std::endl;

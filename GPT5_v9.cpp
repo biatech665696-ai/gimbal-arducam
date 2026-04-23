@@ -373,13 +373,29 @@ static void* handleHttpClient(void* arg) {
             remoteCmdNotify.store(3);
             cmdCode = 3;
         } else if (cmd == "up") {
-            remoteNudgePitch.store(remoteNudgePitch.load() - NUDGE_STEP);
+            if (!trackingEnabled.load()) {
+                manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
+            } else {
+                remoteNudgePitch.store(remoteNudgePitch.load() - NUDGE_STEP);
+            }
         } else if (cmd == "down") {
-            remoteNudgePitch.store(remoteNudgePitch.load() + NUDGE_STEP);
+            if (!trackingEnabled.load()) {
+                manualPitchDeg.store(std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0));
+            } else {
+                remoteNudgePitch.store(remoteNudgePitch.load() + NUDGE_STEP);
+            }
         } else if (cmd == "left") {
-            remoteNudgeYaw.store(remoteNudgeYaw.load() + NUDGE_STEP);
+            if (!trackingEnabled.load()) {
+                manualYawDeg.store(std::clamp(manualYawDeg.load() + MANUAL_STEP, 5.0, 175.0));
+            } else {
+                remoteNudgeYaw.store(remoteNudgeYaw.load() + NUDGE_STEP);
+            }
         } else if (cmd == "right") {
-            remoteNudgeYaw.store(remoteNudgeYaw.load() - NUDGE_STEP);
+            if (!trackingEnabled.load()) {
+                manualYawDeg.store(std::clamp(manualYawDeg.load() - MANUAL_STEP, 5.0, 175.0));
+            } else {
+                remoteNudgeYaw.store(remoteNudgeYaw.load() - NUDGE_STEP);
+            }
         } else if (cmd == "center") {
             remoteNudgeYaw.store(0.0);
             remoteNudgePitch.store(0.0);
@@ -2345,8 +2361,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
-        // Apply remote nudge even when no detection (manual servo control from web UI)
-        {
+        // Apply remote nudge in Tracking mode only.
+        // Fixed mode uses manualYawDeg directly (web/keyboard arrows update it).
+        // Running nudge in Fixed mode caused double-write oscillation every frame.
+        if (currentTrackingEnabled) {
             double ny = remoteNudgeYaw.load();
             double np = remoteNudgePitch.load();
             if (ny != 0.0 || np != 0.0) {

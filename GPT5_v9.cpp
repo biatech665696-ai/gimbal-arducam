@@ -255,72 +255,6 @@ std::atomic<double> remoteNudgeYaw(0.0);
 std::atomic<double> remoteNudgePitch(0.0);
 const double NUDGE_STEP = 3.0;  // degrees per arrow press
 
-// Manual keyboard arrow-key scanning (FIXED mode)
-#define KEY_ARROW_UP    1000
-#define KEY_ARROW_DOWN  1001
-#define KEY_ARROW_RIGHT 1002
-#define KEY_ARROW_LEFT  1003
-const double MANUAL_STEP = 2.0;  // degrees per arrow key press
-std::atomic<double> manualYawDeg(90.0);
-std::atomic<double> manualPitchDeg(90.0);
-std::atomic<bool>   manualMoveReq(false);
-
-// Background keyboard reader thread
-std::atomic<int>  pendingKbdKey(-1);   // key code written by thread, read by main loop
-std::atomic<bool> kbdStop(false);      // set to true to stop the thread
-pthread_t         kbdPthread;
-static termios    kbdOrigTerm;
-static bool       kbdTermSaved = false;
-
-static void* kbdReaderThreadFn(void*) {
-    // Put stdin in raw non-blocking mode
-    if (!isatty(STDIN_FILENO)) return nullptr;
-    if (tcgetattr(STDIN_FILENO, &kbdOrigTerm) != 0) return nullptr;
-    kbdTermSaved = true;
-    termios raw = kbdOrigTerm;
-    raw.c_lflag &= static_cast<unsigned long>(~(ICANON | ECHO));
-    raw.c_cc[VMIN]  = 0;
-    raw.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSANOW, &raw);
-
-    // Helper: blocking read with timeout
-    auto readByte = [](unsigned char& out, int timeoutMs) -> bool {
-        fd_set rfd;
-        FD_ZERO(&rfd);
-        FD_SET(STDIN_FILENO, &rfd);
-        timeval t{ timeoutMs / 1000, (timeoutMs % 1000) * 1000 };
-        if (select(STDIN_FILENO + 1, &rfd, nullptr, nullptr, &t) <= 0) return false;
-        return read(STDIN_FILENO, &out, 1) == 1;
-    };
-
-    while (!kbdStop.load()) {
-        unsigned char ch = 0;
-        if (!readByte(ch, 100)) continue;  // 100ms poll so we can exit on kbdStop
-
-        int code = static_cast<int>(ch);
-        if (ch == 27) {  // possible ESC-sequence (arrow key)
-            unsigned char b2 = 0, b3 = 0;
-            bool got2 = readByte(b2, 50);
-            bool got3 = got2 && b2 == '[' && readByte(b3, 50);
-            if (got3) {
-                switch (b3) {
-                    case 'A': code = KEY_ARROW_UP;    break;
-                    case 'B': code = KEY_ARROW_DOWN;  break;
-                    case 'C': code = KEY_ARROW_RIGHT; break;
-                    case 'D': code = KEY_ARROW_LEFT;  break;
-                    default:  code = 27;               break;
-                }
-            } else {
-                code = 27;
-            }
-        }
-        pendingKbdKey.store(code);
-    }
-
-    if (kbdTermSaved) tcsetattr(STDIN_FILENO, TCSANOW, &kbdOrigTerm);
-    return nullptr;
-}
-
 // Remote mouse click (click on stream to set target)
 std::atomic<int> remoteMouseEvent(0);  // 1=down, 2=move, 3=up
 std::atomic<int> remoteMouseX(-1);
@@ -2080,21 +2014,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         if (!currentTrackingEnabled) {
             if (modeJustChanged) {
                 std::cout << ">>> FIXED MODE ACTIVATED <<<" << std::endl;
-                // Only reset servo when first entering FIXED mode
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
-                setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
-                lastYawDeg   = 90.0;
-                lastPitchDeg = 90.0;
-                manualYawDeg.store(90.0);
-                manualPitchDeg.store(90.0);
-                manualMoveReq.store(false);
-            } else {
-                // Sync display position from arrow-key moves (main thread already sent servo command)
-                if (manualMoveReq.exchange(false)) {
-                    lastYawDeg   = manualYawDeg.load();
-                    lastPitchDeg = manualPitchDeg.load();
-                }
             }
+            setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
+            setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
+            lastYawDeg   = 90.0;
+            lastPitchDeg = 90.0;
         }
 
         // При переключении FIXED → TRACKING: reset all components
@@ -2412,10 +2336,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         }
         if (servoSettleCounter > 0) servoSettleCounter--;
 
-        // Apply remote nudge once when no detection, then reset to 0 (web UI arrow buttons)
+        // Apply remote nudge even when no detection (manual servo control from web UI)
         {
-            double ny = remoteNudgeYaw.exchange(0.0);
-            double np = remoteNudgePitch.exchange(0.0);
+            double ny = remoteNudgeYaw.load();
+            double np = remoteNudgePitch.load();
             if (ny != 0.0 || np != 0.0) {
                 double newYaw   = std::clamp(lastYawDeg   + ny, 5.0, 175.0);
                 double newPitch = std::clamp(lastPitchDeg + np, 5.0, 175.0);
@@ -2765,14 +2689,18 @@ int main()
     cv::moveWindow("Predictive Gimbal Control", 100, 50);
     cv::resizeWindow("Predictive Gimbal Control", 1280, 720);
     // Local mouse click callback — coordinates in display space (1280x720)
-    // LOCAL CLICK по OpenCV-окну отключён — случайные клики на физическом дисплее
-    // уводили серво в потолок. Прицеливание только через веб-браузер.
-    std::cout << "\n*** Click on web stream to aim & fire. R to reset fire. ***\n" << std::endl;
-
-    // Start background keyboard reader thread
-    kbdStop.store(false);
-    pthread_create(&kbdPthread, nullptr, kbdReaderThreadFn, nullptr);
-    std::cout << "*** KEYBOARD THREAD STARTED: arrows/F/S/T/Q/ESC from terminal ***" << std::endl;
+    cv::setMouseCallback("Predictive Gimbal Control", [](int event, int x, int y, int /*flags*/, void* /*userdata*/) {
+        if (event == cv::EVENT_LBUTTONDOWN) {
+            // Convert display 1280x720 -> stream 1600x900 (same ratio as remote)
+            int sx = (int)(x * (1600.0 / 1280.0));
+            int sy = (int)(y * (900.0 / 720.0));
+            localMouseX.store(sx);
+            localMouseY.store(sy);
+            localMouseEvent.store(1);
+            std::cout << "[LOCAL CLICK] display(" << x << "," << y << ") -> stream(" << sx << "," << sy << ")" << std::endl;
+        }
+    });
+    std::cout << "\n*** CLICK ON THE WINDOW TO AIM & FIRE, R TO RESET ***\n" << std::endl;
 
     // Start HTTP MJPEG stream server
     streamRunning = true;
@@ -2800,19 +2728,7 @@ int main()
             }
         }
         
-        // Check for key press: OpenCV window (waitKeyEx) OR terminal thread
-        int key = cv::waitKeyEx(1);
-        // Map OpenCV extended arrow codes to our constants
-        if      (key == 65361) key = KEY_ARROW_LEFT;
-        else if (key == 65363) key = KEY_ARROW_RIGHT;
-        else if (key == 65362) key = KEY_ARROW_UP;
-        else if (key == 65364) key = KEY_ARROW_DOWN;
-        // Fall back to terminal thread if OpenCV window had no event
-        if (key == -1) key = pendingKbdKey.exchange(-1);
-        if (key != -1) {
-            std::cout << "\n[KEY DETECTED] Code: " << key << " (char: '" << (char)key << "')" << std::endl;
-        }
-        
+        int key = cv::waitKey(1);
         if (key == 'q' || key == 'Q' || key == 27 || remoteQuit.load()) {  // Q or ESC - quit (local or remote)
             std::cout << "\n=== QUIT " << (remoteQuit.load() ? "(REMOTE)" : "(LOCAL)") << " ===" << std::endl;
             run = false;
@@ -2850,49 +2766,12 @@ int main()
                     setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
                     // NO SLEEP - instant burst!
                 }
-                // Reset manual position to center so arrow keys start from 90°
-                manualYawDeg.store(90.0);
-                manualPitchDeg.store(90.0);
                 std::cout << ">>> 10x instant commands sent! <<<" << std::endl;
-            }
-        } else if (key == KEY_ARROW_LEFT  || (key & 0xFFFF) == 65361) {  // LEFT arrow — yaw+
-            if (!trackingEnabled.load()) {
-                double nw = std::clamp(manualYawDeg.load() + MANUAL_STEP, 0.0, 180.0);
-                manualYawDeg.store(nw);
-                manualMoveReq.store(true);
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, (float)nw);
-                printf(">>> MANUAL YAW=%.1f° <<<\n", nw);
-            }
-        } else if (key == KEY_ARROW_RIGHT || (key & 0xFFFF) == 65363) {  // RIGHT arrow — yaw-
-            if (!trackingEnabled.load()) {
-                double nw = std::clamp(manualYawDeg.load() - MANUAL_STEP, 0.0, 180.0);
-                manualYawDeg.store(nw);
-                manualMoveReq.store(true);
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, (float)nw);
-                printf(">>> MANUAL YAW=%.1f° <<<\n", nw);
-            }
-        } else if (key == KEY_ARROW_UP    || (key & 0xFFFF) == 65362) {  // UP arrow — pitch-
-            if (!trackingEnabled.load()) {
-                double nw = std::clamp(manualPitchDeg.load() - MANUAL_STEP, 0.0, 180.0);
-                manualPitchDeg.store(nw);
-                manualMoveReq.store(true);
-                setServoAngle(PWM_CHANNEL_VERTICAL, (float)nw);
-                printf(">>> MANUAL PITCH=%.1f° <<<\n", nw);
-            }
-        } else if (key == KEY_ARROW_DOWN  || (key & 0xFFFF) == 65364) {  // DOWN arrow — pitch+
-            if (!trackingEnabled.load()) {
-                double nw = std::clamp(manualPitchDeg.load() + MANUAL_STEP, 0.0, 180.0);
-                manualPitchDeg.store(nw);
-                manualMoveReq.store(true);
-                setServoAngle(PWM_CHANNEL_VERTICAL, (float)nw);
-                printf(">>> MANUAL PITCH=%.1f° <<<\n", nw);
             }
         }
     }
 
     std::cout << "\nShutting down..." << std::endl;
-    kbdStop.store(true);
-    pthread_join(kbdPthread, nullptr);
     run=false;
     queue.notifyAll();
 

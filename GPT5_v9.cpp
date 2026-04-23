@@ -2801,6 +2801,53 @@ int main()
             if (!frame.empty()) {
                 cv::Mat display;
                 cv::resize(frame, display, cv::Size(1280, 720));
+
+                // === D-pad arrow overlay (bottom-left) ===
+                {
+                    const int BTN = 56, GAP = 6, STEP = BTN + GAP;
+                    const int GX = 18;
+                    const int GY = 720 - 18 - 3 * STEP + GAP; // = 522
+
+                    auto btnRect = [&](int col, int row) {
+                        return cv::Rect(GX + col*STEP, GY + row*STEP, BTN, BTN);
+                    };
+                    auto btnCtr = [&](int col, int row) {
+                        return cv::Point(GX + col*STEP + BTN/2, GY + row*STEP + BTN/2);
+                    };
+
+                    // Semi-transparent backgrounds
+                    cv::Mat ovl = display.clone();
+                    for (auto [c,r] : std::initializer_list<std::pair<int,int>>{{1,0},{0,1},{2,1},{1,2}})
+                        cv::rectangle(ovl, btnRect(c,r), cv::Scalar(30,30,30), -1);
+                    cv::rectangle(ovl, btnRect(1,1), cv::Scalar(0,0,160), -1); // STOP: dark red
+                    cv::addWeighted(ovl, 0.65, display, 0.35, 0, display);
+
+                    // Button borders
+                    for (auto [c,r] : std::initializer_list<std::pair<int,int>>{{1,0},{0,1},{2,1},{1,2}})
+                        cv::rectangle(display, btnRect(c,r), cv::Scalar(160,160,160), 2);
+                    cv::rectangle(display, btnRect(1,1), cv::Scalar(60,60,255), 2); // STOP: red border
+
+                    // Arrow triangles (white filled)
+                    auto tri = [&](std::vector<cv::Point> pts) {
+                        const cv::Point* p = pts.data();
+                        int n = (int)pts.size();
+                        cv::fillPoly(display, &p, &n, 1, cv::Scalar(255,255,255));
+                    };
+                    cv::Point cu = btnCtr(1,0);
+                    tri({{cu.x, cu.y-16}, {cu.x-14, cu.y+12}, {cu.x+14, cu.y+12}}); // UP ▲
+                    cv::Point cdwn = btnCtr(1,2);
+                    tri({{cdwn.x, cdwn.y+16}, {cdwn.x-14, cdwn.y-12}, {cdwn.x+14, cdwn.y-12}}); // DOWN ▼
+                    cv::Point clt = btnCtr(0,1);
+                    tri({{clt.x-16, clt.y}, {clt.x+12, clt.y-14}, {clt.x+12, clt.y+14}}); // LEFT ◀
+                    cv::Point crt = btnCtr(2,1);
+                    tri({{crt.x+16, crt.y}, {crt.x-12, crt.y-14}, {crt.x-12, crt.y+14}}); // RIGHT ▶
+
+                    // STOP: white square on red background
+                    cv::Point cs = btnCtr(1,1);
+                    cv::rectangle(display, cv::Point(cs.x-12, cs.y-12), cv::Point(cs.x+12, cs.y+12),
+                                  cv::Scalar(255,255,255), -1);
+                }
+
                 cv::imshow("Predictive Gimbal Control", display);
             }
         }

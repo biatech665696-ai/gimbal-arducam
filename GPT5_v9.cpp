@@ -377,15 +377,15 @@ static void* handleHttpClient(void* arg) {
             cmdCode = 3;
         } else if (cmd == "up") {
             if (!trackingEnabled.load()) {
-                manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
-            } else {
-                remoteNudgePitch.store(remoteNudgePitch.load() - NUDGE_STEP);
-            }
-        } else if (cmd == "down") {
-            if (!trackingEnabled.load()) {
                 manualPitchDeg.store(std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0));
             } else {
                 remoteNudgePitch.store(remoteNudgePitch.load() + NUDGE_STEP);
+            }
+        } else if (cmd == "down") {
+            if (!trackingEnabled.load()) {
+                manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
+            } else {
+                remoteNudgePitch.store(remoteNudgePitch.load() - NUDGE_STEP);
             }
         } else if (cmd == "left") {
             if (!trackingEnabled.load()) {
@@ -2777,11 +2777,11 @@ int main()
             };
             if (inBtn(1,0)) { // UP
                 if (!trackingEnabled.load())
-                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
+                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0));
                 std::cout << "[LOCAL PAD] UP" << std::endl;
             } else if (inBtn(1,2)) { // DOWN
                 if (!trackingEnabled.load())
-                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0));
+                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
                 std::cout << "[LOCAL PAD] DOWN" << std::endl;
             } else if (inBtn(0,1)) { // LEFT
                 if (!trackingEnabled.load())
@@ -2938,13 +2938,13 @@ int main()
             }
         } else if (key == 65362) {  // Up arrow — tilt up (pitch-)
             if (!trackingEnabled.load()) {
-                double v = std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0);
+                double v = std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0);
                 manualPitchDeg.store(v);
                 std::cout << ">>> UP: pitch=" << v << "° <<<" << std::endl;
             }
         } else if (key == 65364) {  // Down arrow — tilt down (pitch+)
             if (!trackingEnabled.load()) {
-                double v = std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0);
+                double v = std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0);
                 manualPitchDeg.store(v);
                 std::cout << ">>> DOWN: pitch=" << v << "° <<<" << std::endl;
             }

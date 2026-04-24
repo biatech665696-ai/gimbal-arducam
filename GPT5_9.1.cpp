@@ -263,6 +263,23 @@ std::atomic<double> currentServoYaw(90.0);   // actual servo position, shared wi
 std::atomic<double> currentServoPitch(90.0);
 std::atomic<bool>   remoteStop(false);       // STOP: freeze at current pos, skip 90° reset
 
+// Dedicated servo control thread command queue
+std::mutex servoCmdMutex;
+double servoCmdYawDeg = 90.0;
+double servoCmdPitchDeg = 90.0;
+std::atomic<bool> servoCmdPending(false);
+
+static inline void queueServoCommand(double yawDeg, double pitchDeg) {
+    yawDeg = std::clamp(yawDeg, 5.0, 175.0);
+    pitchDeg = std::clamp(pitchDeg, 5.0, 175.0);
+    {
+        std::lock_guard<std::mutex> lk(servoCmdMutex);
+        servoCmdYawDeg = yawDeg;
+        servoCmdPitchDeg = pitchDeg;
+    }
+    servoCmdPending.store(true);
+}
+
 // Remote mouse click (click on stream to set target)
 std::atomic<int> remoteMouseEvent(0);  // 1=down, 2=move, 3=up
 std::atomic<int> remoteMouseX(-1);
@@ -1959,6 +1976,28 @@ void cameraThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     cap.release();
 }
 
+/* =============== SERVO CONTROL THREAD =============== */
+
+void servoControlThread(atomic<bool>& run)
+{
+    while (run.load() || servoCmdPending.load()) {
+        if (servoCmdPending.exchange(false)) {
+            double yawDeg = 90.0, pitchDeg = 90.0;
+            {
+                std::lock_guard<std::mutex> lk(servoCmdMutex);
+                yawDeg = servoCmdYawDeg;
+                pitchDeg = servoCmdPitchDeg;
+            }
+            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
+            setServoAngle(PWM_CHANNEL_VERTICAL,   static_cast<float>(pitchDeg));
+            currentServoYaw.store(yawDeg);
+            currentServoPitch.store(pitchDeg);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+}
+
 /* =============== TRACKING THREAD =============== */
 
 void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
@@ -2035,8 +2074,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     const double DPP = 72.0 / 1920.0 * 1.05;
                     double newYaw   = std::clamp(lastYawDeg   - ex * DPP, 5.0, 175.0);
                     double newPitch = std::clamp(lastPitchDeg - ey * DPP, 5.0, 175.0);
-                    setServoAngle(PWM_CHANNEL_HORIZONTAL, (float)newYaw);
-                    setServoAngle(PWM_CHANNEL_VERTICAL,   (float)newPitch);
+                    queueServoCommand(newYaw, newPitch);
                     lastYawDeg   = newYaw;
                     lastPitchDeg = newPitch;
                     remoteCmdNotify.store(5);
@@ -2069,8 +2107,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
             double myaw   = manualYawDeg.load();
             double mpitch = manualPitchDeg.load();
-            setServoAngle(PWM_CHANNEL_HORIZONTAL, (float)myaw);
-            setServoAngle(PWM_CHANNEL_VERTICAL,   (float)mpitch);
+            queueServoCommand(myaw, mpitch);
             lastYawDeg   = myaw;
             lastPitchDeg = mpitch;
             currentServoYaw.store(myaw);
@@ -2284,8 +2321,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                                   << " deg (dir=" << scanDirection << ")" << std::endl;
                     }
 
-                    setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(scanYawDeg));
-                    setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
+                    queueServoCommand(scanYawDeg, 90.0);
                     lastYawDeg = scanYawDeg;
                     lastPitchDeg = 90.0;
                     yawDeg = scanYawDeg;
@@ -2389,8 +2425,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             yawDeg   = std::clamp(yawDeg, 5.0, 175.0);
             pitchDeg = std::clamp(pitchDeg, 5.0, 175.0);
 
-            setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(yawDeg));
-            setServoAngle(PWM_CHANNEL_VERTICAL, static_cast<float>(pitchDeg));
+            queueServoCommand(yawDeg, pitchDeg);
             lastYawDeg = yawDeg;
             lastPitchDeg = pitchDeg;
             currentServoYaw.store(yawDeg);
@@ -2410,8 +2445,7 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             if (ny != 0.0 || np != 0.0) {
                 double newYaw   = std::clamp(lastYawDeg   + ny, 5.0, 175.0);
                 double newPitch = std::clamp(lastPitchDeg + np, 5.0, 175.0);
-                setServoAngle(PWM_CHANNEL_HORIZONTAL, static_cast<float>(newYaw));
-                setServoAngle(PWM_CHANNEL_VERTICAL,   static_cast<float>(newPitch));
+                queueServoCommand(newYaw, newPitch);
                 lastYawDeg   = newYaw;
                 lastPitchDeg = newPitch;
             }
@@ -2744,6 +2778,10 @@ int main()
     std::cout << "\nStarting camera thread..." << std::endl;
     thread cam(cameraThread, ref(queue), ref(run));
 
+    std::cout << "Starting dedicated servo control thread..." << std::endl;
+    thread servo(servoControlThread, ref(run));
+    queueServoCommand(90.0, 90.0);
+
     std::cout << "Starting tracking thread..." << std::endl;
     thread track(trackingThread, ref(queue), ref(run));
 
@@ -2918,11 +2956,7 @@ int main()
                 std::cout << ">>> FIXED MODE - Servos centered at 90°, 90°. Use arrows to scan. <<<" << std::endl;
                 manualYawDeg.store(90.0);
                 manualPitchDeg.store(90.0);
-                // Send commands WITHOUT delays for instant response
-                for (int i = 0; i < 10; i++) {
-                    setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
-                    setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
-                }
+                queueServoCommand(90.0, 90.0);
             }
         } else if (key == 65361) {  // Left arrow — pan left (yaw+)
             if (!trackingEnabled.load()) {
@@ -2955,13 +2989,15 @@ int main()
     run=false;
     queue.notifyAll();
 
+    // Flush center command through dedicated servo thread before shutdown
+    queueServoCommand(90.0, 90.0);
+
     cam.join();
     track.join();
+    servo.join();
     
     // Shutdown PWM and return servos to center
     std::cout << "Returning servos to center position..." << std::endl;
-    setServoAngle(PWM_CHANNEL_HORIZONTAL, 90.0f);
-    setServoAngle(PWM_CHANNEL_VERTICAL, 90.0f);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
     
     if (streamRunning) {

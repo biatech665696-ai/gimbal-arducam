@@ -2768,9 +2768,9 @@ int main()
     // Local mouse click callback — coordinates in display space (1280x720)
     cv::setMouseCallback("Predictive Gimbal Control", [](int event, int x, int y, int /*flags*/, void* /*userdata*/) {
         if (event == cv::EVENT_LBUTTONDOWN) {
-            // D-pad geometry (must match drawing code): BTN=56, GAP=6, STEP=62, GX=18, GY=522
+            // D-pad geometry (must match drawing code): BTN=28, GAP=6, STEP=34, GX=18, GY=606
             // col/row → x=[GX+col*STEP .. +BTN], y=[GY+row*STEP .. +BTN]
-            constexpr int BTN=56, STEP=62, GX=18, GY=522;
+            constexpr int BTN=28, STEP=34, GX=18, GY=606;
             auto inBtn = [&](int col, int row) {
                 int bx = GX + col*STEP, by = GY + row*STEP;
                 return x >= bx && x < bx+BTN && y >= by && y < by+BTN;
@@ -2837,9 +2837,9 @@ int main()
 
                 // === D-pad arrow overlay (bottom-left) ===
                 {
-                    const int BTN = 56, GAP = 6, STEP = BTN + GAP;
+                    const int BTN = 28, GAP = 6, STEP = BTN + GAP;
                     const int GX = 18;
-                    const int GY = 720 - 18 - 3 * STEP + GAP; // = 522
+                    const int GY = 720 - 18 - 3 * STEP + GAP; // = 606
 
                     auto btnRect = [&](int col, int row) {
                         return cv::Rect(GX + col*STEP, GY + row*STEP, BTN, BTN);

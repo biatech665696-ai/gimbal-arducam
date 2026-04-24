@@ -237,7 +237,7 @@ cv::Mat displayFrame;
 std::atomic<bool> hasNewFrame(false);
 
 // Global tracking mode control (declared early for HTTP handler access)
-std::atomic<bool> trackingEnabled(true);  // Start with tracking ENABLED by default
+std::atomic<bool> trackingEnabled(false); // Start with tracking DISABLED (Fixed mode) by default
 std::atomic<bool> scanEnabled(false);     // Scan mode OFF by default
 std::atomic<bool> trajectoryEnabled(true); // Trajectory drawing ON by default
 

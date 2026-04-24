@@ -2768,9 +2768,9 @@ int main()
     // Local mouse click callback — coordinates in display space (1280x720)
     cv::setMouseCallback("Predictive Gimbal Control", [](int event, int x, int y, int /*flags*/, void* /*userdata*/) {
         if (event == cv::EVENT_LBUTTONDOWN) {
-            // D-pad geometry (must match drawing code): BTN=28, GAP=6, STEP=34, GX=18, GY=606
+            // D-pad geometry (must match drawing code): BTN=42, GAP=6, STEP=48, GX=18, GY=564
             // col/row → x=[GX+col*STEP .. +BTN], y=[GY+row*STEP .. +BTN]
-            constexpr int BTN=28, STEP=34, GX=18, GY=606;
+            constexpr int BTN=42, STEP=48, GX=18, GY=564;
             auto inBtn = [&](int col, int row) {
                 int bx = GX + col*STEP, by = GY + row*STEP;
                 return x >= bx && x < bx+BTN && y >= by && y < by+BTN;
@@ -2837,9 +2837,9 @@ int main()
 
                 // === D-pad arrow overlay (bottom-left) ===
                 {
-                    const int BTN = 28, GAP = 6, STEP = BTN + GAP;
+                    const int BTN = 42, GAP = 6, STEP = BTN + GAP;
                     const int GX = 18;
-                    const int GY = 720 - 18 - 3 * STEP + GAP; // = 606
+                    const int GY = 720 - 18 - 3 * STEP + GAP; // = 564
 
                     auto btnRect = [&](int col, int row) {
                         return cv::Rect(GX + col*STEP, GY + row*STEP, BTN, BTN);
@@ -2867,17 +2867,17 @@ int main()
                         cv::fillPoly(display, &p, &n, 1, cv::Scalar(255,255,255));
                     };
                     cv::Point cu = btnCtr(1,0);
-                    tri({{cu.x, cu.y-8}, {cu.x-7, cu.y+6}, {cu.x+7, cu.y+6}}); // UP ▲ (2x smaller)
+                    tri({{cu.x, cu.y-12}, {cu.x-10, cu.y+9}, {cu.x+10, cu.y+9}}); // UP ▲
                     cv::Point cdwn = btnCtr(1,2);
-                    tri({{cdwn.x, cdwn.y+8}, {cdwn.x-7, cdwn.y-6}, {cdwn.x+7, cdwn.y-6}}); // DOWN ▼ (2x smaller)
+                    tri({{cdwn.x, cdwn.y+12}, {cdwn.x-10, cdwn.y-9}, {cdwn.x+10, cdwn.y-9}}); // DOWN ▼
                     cv::Point clt = btnCtr(0,1);
-                    tri({{clt.x-8, clt.y}, {clt.x+6, clt.y-7}, {clt.x+6, clt.y+7}}); // LEFT ◀ (2x smaller)
+                    tri({{clt.x-12, clt.y}, {clt.x+9, clt.y-10}, {clt.x+9, clt.y+10}}); // LEFT ◀
                     cv::Point crt = btnCtr(2,1);
-                    tri({{crt.x+8, crt.y}, {crt.x-6, crt.y-7}, {crt.x-6, crt.y+7}}); // RIGHT ▶ (2x smaller)
+                    tri({{crt.x+12, crt.y}, {crt.x-9, crt.y-10}, {crt.x-9, crt.y+10}}); // RIGHT ▶
 
                     // STOP: white square on red background
                     cv::Point cs = btnCtr(1,1);
-                    cv::rectangle(display, cv::Point(cs.x-6, cs.y-6), cv::Point(cs.x+6, cs.y+6),
+                    cv::rectangle(display, cv::Point(cs.x-9, cs.y-9), cv::Point(cs.x+9, cs.y+9),
                                   cv::Scalar(255,255,255), -1);
                 }
 

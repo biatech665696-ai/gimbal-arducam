@@ -2867,17 +2867,17 @@ int main()
                         cv::fillPoly(display, &p, &n, 1, cv::Scalar(255,255,255));
                     };
                     cv::Point cu = btnCtr(1,0);
-                    tri({{cu.x, cu.y-16}, {cu.x-14, cu.y+12}, {cu.x+14, cu.y+12}}); // UP ▲
+                    tri({{cu.x, cu.y-8}, {cu.x-7, cu.y+6}, {cu.x+7, cu.y+6}}); // UP ▲ (2x smaller)
                     cv::Point cdwn = btnCtr(1,2);
-                    tri({{cdwn.x, cdwn.y+16}, {cdwn.x-14, cdwn.y-12}, {cdwn.x+14, cdwn.y-12}}); // DOWN ▼
+                    tri({{cdwn.x, cdwn.y+8}, {cdwn.x-7, cdwn.y-6}, {cdwn.x+7, cdwn.y-6}}); // DOWN ▼ (2x smaller)
                     cv::Point clt = btnCtr(0,1);
-                    tri({{clt.x-16, clt.y}, {clt.x+12, clt.y-14}, {clt.x+12, clt.y+14}}); // LEFT ◀
+                    tri({{clt.x-8, clt.y}, {clt.x+6, clt.y-7}, {clt.x+6, clt.y+7}}); // LEFT ◀ (2x smaller)
                     cv::Point crt = btnCtr(2,1);
-                    tri({{crt.x+16, crt.y}, {crt.x-12, crt.y-14}, {crt.x-12, crt.y+14}}); // RIGHT ▶
+                    tri({{crt.x+8, crt.y}, {crt.x-6, crt.y-7}, {crt.x-6, crt.y+7}}); // RIGHT ▶ (2x smaller)
 
                     // STOP: white square on red background
                     cv::Point cs = btnCtr(1,1);
-                    cv::rectangle(display, cv::Point(cs.x-12, cs.y-12), cv::Point(cs.x+12, cs.y+12),
+                    cv::rectangle(display, cv::Point(cs.x-6, cs.y-6), cv::Point(cs.x+6, cs.y+6),
                                   cv::Scalar(255,255,255), -1);
                 }
 

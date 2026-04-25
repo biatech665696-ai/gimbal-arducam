@@ -2741,12 +2741,11 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                 "S - Scan on/off",
                 "T - Trajectory on/off",
                 "Arrows - Manual (Fixed)",
-                "Click - Aim",
                 "F - Fire ON",
                 "R - Fire OFF",
                 "Q - Quit"
             };
-            const int nLines = 8;
+            const int nLines = 7;
             const double fontScale = 0.65;
             const int thickness = 2;
             const int lineH = 28;

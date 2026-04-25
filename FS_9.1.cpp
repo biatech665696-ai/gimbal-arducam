@@ -537,7 +537,7 @@ static void* handleHttpClient(void* arg) {
             "<button ontouchstart='e_touch(event,\"up\")' onmousedown='sendCmd(\"up\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8593;</button>"
             "<div></div>"
             "<button ontouchstart='e_touch(event,\"left\")' onmousedown='sendCmd(\"left\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8592;</button>"
-            "<button ontouchstart='e_touch(event,\"stop\")' onmousedown='sendCmd(\"stop\")' style='font-size:15px;font-weight:bold;background:rgba(180,0,0,0.75);color:#fff;border:2px solid #f66;border-radius:8px;cursor:pointer'>&#9632;</button>"
+            "<button ontouchstart='e_touch(event,\"stop\")' onmousedown='sendCmd(\"stop\")' style='font-size:13px;font-weight:bold;background:rgba(180,0,0,0.75);color:#fff;border:2px solid #f66;border-radius:8px;cursor:pointer'>STOP</button>"
             "<button ontouchstart='e_touch(event,\"right\")' onmousedown='sendCmd(\"right\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8594;</button>"
             "<div></div>"
             "<button ontouchstart='e_touch(event,\"down\")' onmousedown='sendCmd(\"down\")' style='font-size:26px;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:10px;cursor:pointer'>&#8595;</button>"

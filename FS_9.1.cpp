@@ -2099,12 +2099,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                     lastYawDeg   = newYaw;
                     lastPitchDeg = newPitch;
                     remoteCmdNotify.store(5);
-                    // Fire: set GPIO26 HIGH on click
-                    setGpioFire(true);
-                    gpioFireState.store(true);
-                    std::cout << "[REMOTE CLICK] stream(" << rmX << "," << rmY
+                    std::cout << "[CLICK AIM] stream(" << rmX << "," << rmY
                               << ") -> servo(" << std::fixed << std::setprecision(1)
-                              << newYaw << "," << newPitch << ") [GPIO" << GPIO_FIRE << "=1]" << std::endl;
+                              << newYaw << "," << newPitch << ")" << std::endl;
                 }
             }
         }
@@ -2906,7 +2903,7 @@ int main()
             }
         }
     });
-    std::cout << "\n*** CLICK ON THE WINDOW TO AIM & FIRE, R TO RESET ***\n" << std::endl;
+    std::cout << "\n*** CLICK TO AIM | CTRL+F TO FIRE | R TO RESET FIRE ***\n" << std::endl;
 
     // Start HTTP MJPEG stream server
     streamRunning = true;

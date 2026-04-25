@@ -520,35 +520,35 @@ static void* handleHttpClient(void* arg) {
             "<body style='margin:0;background:#000;color:#fff;font-family:Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;overflow:hidden'>"
             "<div id='vidwrap' style='position:relative;width:min(100vw,177.78vh);height:min(100vh,56.25vw);overflow:hidden;flex-shrink:0'>"
             "<img id='streamImg' src='/stream.mjpg' alt='Stream' style='display:block;width:100%;height:100%;'>"
-            "<div id='panel' style='position:absolute;top:1vmin;right:1vmin;z-index:10;background:rgba(0,0,0,0.55);padding:0.8vmin;border:1px solid #888;border-radius:1vmin;max-width:45%;box-sizing:border-box'>"
-            "<div id='remoteStatus' style='font-size:1.5vmin;color:#9f9;margin:0 0 0.5vmin 0.3vmin'>Ready</div>"
-            "<button id='btn-c' type='button' onclick='sendCmd(\"c\")' style='font-size:2vmin;font-weight:bold;padding:0.5vmin 1.1vmin;margin:0.3vmin;min-width:4.7vmin'>C</button>"
-            "<button id='btn-s' type='button' onclick='sendCmd(\"s\")' style='font-size:2vmin;font-weight:bold;padding:0.5vmin 1.1vmin;margin:0.3vmin;min-width:4.7vmin'>S</button>"
-            "<button id='btn-t' type='button' onclick='sendCmd(\"t\")' style='font-size:2vmin;font-weight:bold;padding:0.5vmin 1.1vmin;margin:0.3vmin;min-width:4.7vmin'>T</button>"
-            "<button id='btn-r' type='button' onclick='sendCmd(\"r\")' style='font-size:2vmin;font-weight:bold;padding:0.5vmin 1.1vmin;margin:0.3vmin;min-width:4.7vmin'>R</button>"
-            "<button id='btn-q' type='button' onclick='sendCmd(\"q\")' style='font-size:2vmin;font-weight:bold;padding:0.5vmin 1.1vmin;margin:0.3vmin;min-width:4.7vmin'>Q</button>"
-            "<br><button id='btn-fire' type='button' onclick='sendCmd(\"fire\")' "
-            "style='font-size:2.5vmin;font-weight:bold;padding:0.9vmin 2.2vmin;margin:0.7vmin 0.3vmin 0.3vmin 0.3vmin;width:100%;background:#cc0000;color:#fff;border:2px solid #ff4444;border-radius:1vmin;cursor:pointer;letter-spacing:2px'>FIRE</button>"
+            "<div id='panel' style='position:absolute;top:min(1vw,1.78vh);right:min(1vw,1.78vh);z-index:10;background:rgba(0,0,0,0.55);padding:min(0.5vw,0.89vh);border:1px solid #888;border-radius:min(0.7vw,1.25vh);max-width:40%;box-sizing:border-box;cursor:grab'>"
+            "<div id='remoteStatus' style='font-size:min(1vw,1.78vh);color:#9f9;margin:0 0 min(0.3vw,0.53vh) min(0.2vw,0.36vh)'>Ready</div>"
+            "<button id='btn-c' type='button' onclick='sendCmd(\"c\")' style='font-size:min(1.3vw,2.3vh);font-weight:bold;padding:min(0.3vw,0.53vh) min(0.7vw,1.25vh);margin:min(0.2vw,0.36vh);min-width:min(3vw,5.3vh)'>C</button>"
+            "<button id='btn-s' type='button' onclick='sendCmd(\"s\")' style='font-size:min(1.3vw,2.3vh);font-weight:bold;padding:min(0.3vw,0.53vh) min(0.7vw,1.25vh);margin:min(0.2vw,0.36vh);min-width:min(3vw,5.3vh)'>S</button>"
+            "<button id='btn-t' type='button' onclick='sendCmd(\"t\")' style='font-size:min(1.3vw,2.3vh);font-weight:bold;padding:min(0.3vw,0.53vh) min(0.7vw,1.25vh);margin:min(0.2vw,0.36vh);min-width:min(3vw,5.3vh)'>T</button>"
+            "<button id='btn-r' type='button' onclick='sendCmd(\"r\")' style='font-size:min(1.3vw,2.3vh);font-weight:bold;padding:min(0.3vw,0.53vh) min(0.7vw,1.25vh);margin:min(0.2vw,0.36vh);min-width:min(3vw,5.3vh)'>R</button>"
+            "<button id='btn-q' type='button' onclick='sendCmd(\"q\")' style='font-size:min(1.3vw,2.3vh);font-weight:bold;padding:min(0.3vw,0.53vh) min(0.7vw,1.25vh);margin:min(0.2vw,0.36vh);min-width:min(3vw,5.3vh)'>Q</button>"
+            "<br><button id='btn-fire' type='button' onclick='toggleFire()' "
+            "style='font-size:min(1.6vw,2.85vh);font-weight:bold;padding:min(0.5vw,0.89vh) min(1.3vw,2.3vh);margin:min(0.4vw,0.71vh) min(0.2vw,0.36vh) min(0.2vw,0.36vh);width:100%;background:#0a7a0a;color:#fff;border:2px solid #0f0;border-radius:min(0.7vw,1.25vh);cursor:pointer;letter-spacing:2px'>FIRE</button>"
             "</div>"
             // Arrow pad — bottom-left corner overlay
-            "<div style='position:absolute;bottom:1vmin;left:1vmin;z-index:10;user-select:none'>"
-            "<div style='display:grid;grid-template-columns:5.5vmin 5.5vmin 5.5vmin;grid-template-rows:5.5vmin 5.5vmin 5.5vmin;gap:0.6vmin'>"
+            "<div id='dpad' style='position:absolute;bottom:min(1vw,1.78vh);left:min(1vw,1.78vh);z-index:10;user-select:none;cursor:grab'>"
+            "<div style='display:grid;grid-template-columns:min(3.5vw,6.2vh) min(3.5vw,6.2vh) min(3.5vw,6.2vh);grid-template-rows:min(3.5vw,6.2vh) min(3.5vw,6.2vh) min(3.5vw,6.2vh);gap:min(0.4vw,0.71vh)'>"
             "<div></div>"
-            "<button ontouchstart='e_touch(event,\"up\")' onmousedown='sendCmd(\"up\")' style='font-size:2.5vmin;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:1vmin;cursor:pointer'>&#8593;</button>"
+            "<button ontouchstart='e_touch(event,\"up\")' onmousedown='sendCmd(\"up\")' style='font-size:min(1.6vw,2.85vh);background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:min(0.7vw,1.25vh);cursor:pointer'>&#8593;</button>"
             "<div></div>"
-            "<button ontouchstart='e_touch(event,\"left\")' onmousedown='sendCmd(\"left\")' style='font-size:2.5vmin;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:1vmin;cursor:pointer'>&#8592;</button>"
-            "<button ontouchstart='e_touch(event,\"stop\")' onmousedown='sendCmd(\"stop\")' style='font-size:1.2vmin;font-weight:bold;background:rgba(180,0,0,0.75);color:#fff;border:2px solid #f66;border-radius:0.8vmin;cursor:pointer'>STOP</button>"
-            "<button ontouchstart='e_touch(event,\"right\")' onmousedown='sendCmd(\"right\")' style='font-size:2.5vmin;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:1vmin;cursor:pointer'>&#8594;</button>"
+            "<button ontouchstart='e_touch(event,\"left\")' onmousedown='sendCmd(\"left\")' style='font-size:min(1.6vw,2.85vh);background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:min(0.7vw,1.25vh);cursor:pointer'>&#8592;</button>"
+            "<button id='btn-stop' ontouchstart='toggleStop()' onmousedown='toggleStop()' style='font-size:min(0.8vw,1.4vh);font-weight:bold;background:#0a7a0a;color:#fff;border:2px solid #0f0;border-radius:min(0.6vw,1.07vh);cursor:pointer'>STOP</button>"
+            "<button ontouchstart='e_touch(event,\"right\")' onmousedown='sendCmd(\"right\")' style='font-size:min(1.6vw,2.85vh);background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:min(0.7vw,1.25vh);cursor:pointer'>&#8594;</button>"
             "<div></div>"
-            "<button ontouchstart='e_touch(event,\"down\")' onmousedown='sendCmd(\"down\")' style='font-size:2.5vmin;background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:1vmin;cursor:pointer'>&#8595;</button>"
+            "<button ontouchstart='e_touch(event,\"down\")' onmousedown='sendCmd(\"down\")' style='font-size:min(1.6vw,2.85vh);background:rgba(0,0,0,0.55);color:#fff;border:2px solid #aaa;border-radius:min(0.7vw,1.25vh);cursor:pointer'>&#8595;</button>"
             "<div></div>"
             "</div>"
             "</div>"
             "<script>"
-            "var lastSeq=-1;"
+            "var lastSeq=-1,curFire=false,curTracking=true;"
             "function setBtn(key,active){var el=document.getElementById('btn-'+key);if(!el)return;el.style.background=active?'#0f766e':'#f0f0f0';el.style.color=active?'#fff':'#000';el.style.border='2px solid '+(active?'#5eead4':'#888');}"
             "function setStatus(text,color){var el=document.getElementById('remoteStatus');el.textContent=text;el.style.color=color||'#9f9';}"
-            "function applyState(state){setBtn('f',state.tracking);setBtn('s',state.scan);setBtn('t',state.trajectory);setBtn('r',state.fire);setBtn('q',false);var fb=document.getElementById('btn-fire');if(fb){fb.style.background=state.fire?'#ff2200':'#cc0000';}if(state.seq!==lastSeq){lastSeq=state.seq;if(state.last_cmd===1)setStatus('F ok','#9f9');else if(state.last_cmd===2)setStatus('S ok','#9f9');else if(state.last_cmd===3)setStatus('T ok','#9f9');else if(state.last_cmd===4)setStatus('Q ok','#f99');else if(state.last_cmd===5)setStatus('Aim ok','#9f9');else if(state.last_cmd===6)setStatus('R reset','#9f9');else if(state.last_cmd===7)setStatus('FIRE!','#f44');}}"
+            "function applyState(state){curFire=state.fire;curTracking=state.tracking;setBtn('f',state.tracking);setBtn('s',state.scan);setBtn('t',state.trajectory);setBtn('r',state.fire);setBtn('q',false);var fb=document.getElementById('btn-fire');if(fb){fb.style.background=state.fire?'#cc0000':'#0a7a0a';fb.style.border='2px solid '+(state.fire?'#f44':'#0f0');}var sb=document.getElementById('btn-stop');if(sb){sb.style.background=state.tracking?'#0a7a0a':'#cc0000';sb.style.border='2px solid '+(state.tracking?'#0f0':'#f44');}if(state.seq!==lastSeq){lastSeq=state.seq;if(state.last_cmd===1)setStatus('F ok','#9f9');else if(state.last_cmd===2)setStatus('S ok','#9f9');else if(state.last_cmd===3)setStatus('T ok','#9f9');else if(state.last_cmd===4)setStatus('Q ok','#f99');else if(state.last_cmd===5)setStatus('Aim ok','#9f9');else if(state.last_cmd===6)setStatus('R reset','#9f9');else if(state.last_cmd===7)setStatus('FIRE!','#f44');}}" "function toggleFire(){if(curFire)sendCmd('r');else sendCmd('fire');}" "function toggleStop(){if(curTracking)sendCmd('stop');else sendCmd('c');}" 
             "function fetchStatus(){var x=new XMLHttpRequest();x.open('GET','/status?ts='+Date.now(),true);x.timeout=1200;x.onload=function(){if(x.status!==200)return;try{applyState(JSON.parse(x.responseText));}catch(e){setStatus('status err','#f99');}};x.onerror=function(){setStatus('offline','#f99');};x.ontimeout=function(){setStatus('timeout','#f99');};x.send();}"
             "function sendCmd(cmd){setStatus('send '+cmd.toUpperCase(),'#ffd166');var x=new XMLHttpRequest();x.open('GET','/cmd/'+cmd,true);x.timeout=1500;x.onload=function(){if(x.status===200){fetchStatus();}else{setStatus('cmd fail','#f99');}};x.onerror=function(){setStatus('cmd err','#f99');};x.ontimeout=function(){setStatus('cmd timeout','#f99');};x.send();}"
             "document.addEventListener('keydown',function(e){var k=e.key.toLowerCase();if(e.ctrlKey&&k==='f'){e.preventDefault();sendCmd('fire');}else if(k==='s'||k==='t'||k==='r')sendCmd(k);else if(k==='f')sendCmd(k);else if(k==='q'||k==='escape')sendCmd('q');else if(e.key==='ArrowLeft'){e.preventDefault();sendCmd('left');}else if(e.key==='ArrowRight'){e.preventDefault();sendCmd('right');}else if(e.key==='ArrowUp'){e.preventDefault();sendCmd('up');}else if(e.key==='ArrowDown'){e.preventDefault();sendCmd('down');}});"
@@ -566,6 +566,38 @@ static void* handleHttpClient(void* arg) {
             "});"
             "fetchStatus();setInterval(fetchStatus,500);"
             "function e_touch(ev,cmd){ev.preventDefault();sendCmd(cmd);}"
+            "function makeDraggable(el){"
+            "var ox=0,oy=0,dragging=false;"
+            "function gw(){return document.getElementById('vidwrap');}"
+            "function clamp(){"
+            "if(!el.style.left||!el.style.left.endsWith('px'))return;"
+            "var w=gw();var mX=w.offsetWidth-el.offsetWidth;var mY=w.offsetHeight-el.offsetHeight;"
+            "el.style.left=Math.max(0,Math.min(mX,parseInt(el.style.left)))+'px';"
+            "el.style.top=Math.max(0,Math.min(mY,parseInt(el.style.top)))+'px';}"
+            "function start(cx,cy){"
+            "var wr=gw().getBoundingClientRect();var er=el.getBoundingClientRect();"
+            "el.style.left=(er.left-wr.left)+'px';el.style.top=(er.top-wr.top)+'px';"
+            "el.style.right='auto';el.style.bottom='auto';"
+            "ox=cx-er.left;oy=cy-er.top;dragging=true;el.style.cursor='grabbing';}"
+            "function move(cx,cy){"
+            "if(!dragging)return;"
+            "var wr=gw().getBoundingClientRect();var w=gw();"
+            "var mX=w.offsetWidth-el.offsetWidth;var mY=w.offsetHeight-el.offsetHeight;"
+            "el.style.left=Math.max(0,Math.min(mX,cx-ox-wr.left))+'px';"
+            "el.style.top=Math.max(0,Math.min(mY,cy-oy-wr.top))+'px';}"
+            "function end(){dragging=false;el.style.cursor='grab';}"
+            "el._clamp=clamp;"
+            "el.addEventListener('mousedown',function(e){if(e.button!==0)return;start(e.clientX,e.clientY);e.preventDefault();});"
+            "document.addEventListener('mousemove',function(e){move(e.clientX,e.clientY);});"
+            "document.addEventListener('mouseup',end);"
+            "el.addEventListener('touchstart',function(e){var t=e.touches[0];start(t.clientX,t.clientY);},{passive:true});"
+            "el.addEventListener('touchmove',function(e){var t=e.touches[0];move(t.clientX,t.clientY);e.preventDefault();},{passive:false});"
+            "el.addEventListener('touchend',end);}"
+            "makeDraggable(document.getElementById('panel'));"
+            "makeDraggable(document.getElementById('dpad'));"
+            "window.addEventListener('resize',function(){"
+            "var p=document.getElementById('panel');var d=document.getElementById('dpad');"
+            "if(p&&p._clamp)p._clamp();if(d&&d._clamp)d._clamp();});"
             "</script>"
             "</div>"
             "</body></html>";
@@ -2862,45 +2894,90 @@ int main()
     // Local mouse click callback — coordinates in display space (1280x720)
     cv::setMouseCallback("Predictive Gimbal Control", [](int event, int x, int y, int /*flags*/, void* /*userdata*/) {
         if (event == cv::EVENT_LBUTTONDOWN) {
-            // D-pad geometry (must match drawing code): BTN=42, GAP=6, STEP=48, GX=18, GY=564
-            // col/row → x=[GX+col*STEP .. +BTN], y=[GY+row*STEP .. +BTN]
-            constexpr int BTN=42, STEP=48, GX=18, GY=564;
-            auto inBtn = [&](int col, int row) {
-                int bx = GX + col*STEP, by = GY + row*STEP;
-                return x >= bx && x < bx+BTN && y >= by && y < by+BTN;
-            };
-            if (inBtn(1,0)) { // UP
-                if (!trackingEnabled.load())
-                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0));
-                std::cout << "[LOCAL PAD] UP" << std::endl;
-            } else if (inBtn(1,2)) { // DOWN
-                if (!trackingEnabled.load())
-                    manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
-                std::cout << "[LOCAL PAD] DOWN" << std::endl;
-            } else if (inBtn(0,1)) { // LEFT
-                if (!trackingEnabled.load())
-                    manualYawDeg.store(std::clamp(manualYawDeg.load() + MANUAL_STEP, 5.0, 175.0));
-                std::cout << "[LOCAL PAD] LEFT" << std::endl;
-            } else if (inBtn(2,1)) { // RIGHT
-                if (!trackingEnabled.load())
-                    manualYawDeg.store(std::clamp(manualYawDeg.load() - MANUAL_STEP, 5.0, 175.0));
-                std::cout << "[LOCAL PAD] RIGHT" << std::endl;
-            } else if (inBtn(1,1)) { // STOP
-                remoteStop.store(true);
-                manualYawDeg.store(currentServoYaw.load());
-                manualPitchDeg.store(currentServoPitch.load());
-                scanEnabled.store(false);
-                trackingEnabled.store(false);
-                std::cout << "[LOCAL PAD] STOP yaw=" << currentServoYaw.load()
-                          << " pitch=" << currentServoPitch.load() << std::endl;
-            } else {
-                // Outside D-pad: aim & fire
-                int sx = (int)(x * (1600.0 / 1280.0));
-                int sy = (int)(y * (900.0 / 720.0));
-                localMouseX.store(sx);
-                localMouseY.store(sy);
-                localMouseEvent.store(1);
-                std::cout << "[LOCAL CLICK] display(" << x << "," << y << ") -> stream(" << sx << "," << sy << ")" << std::endl;
+            // === Control panel hit-test (top-right): x=980,y=10, buttons 50x30, FIRE below ===
+            constexpr int PP_X=980, PP_Y=10, PB_W=50, PB_H=30, PB_GAP=6, FIRE_H2=45, PP_PAD=8;
+            bool hitPanel = false;
+            // Button row: C S T R Q
+            if (!hitPanel && y >= PP_Y+PP_PAD && y < PP_Y+PP_PAD+PB_H) {
+                for (int i = 0; i < 5 && !hitPanel; i++) {
+                    int bx2 = PP_X + PP_PAD + i*(PB_W+PB_GAP);
+                    if (x >= bx2 && x < bx2+PB_W) {
+                        hitPanel = true;
+                        if (i == 0) { // C
+                            bool wasT2 = trackingEnabled.exchange(!trackingEnabled.load());
+                            if (wasT2) { manualYawDeg.store(90.0); manualPitchDeg.store(90.0); queueServoCommand(90.0,90.0); std::cout << "[LOCAL BTN] FIXED" << std::endl; }
+                            else { std::cout << "[LOCAL BTN] TRACKING ON" << std::endl; }
+                        } else if (i == 1) { // S
+                            scanEnabled.exchange(!scanEnabled.load());
+                            std::cout << "[LOCAL BTN] SCAN toggle" << std::endl;
+                        } else if (i == 2) { // T
+                            trajectoryEnabled.exchange(!trajectoryEnabled.load());
+                            std::cout << "[LOCAL BTN] TRAJ toggle" << std::endl;
+                        } else if (i == 3) { // R - fire OFF
+                            setGpioFire(false); gpioFireState.store(false);
+                            std::cout << "[LOCAL BTN] R: FIRE OFF" << std::endl;
+                        } else { // Q
+                            remoteQuit.store(true);
+                            std::cout << "[LOCAL BTN] Q: QUIT" << std::endl;
+                        }
+                    }
+                }
+            }
+            // FIRE button row
+            if (!hitPanel) {
+                constexpr int fby2 = PP_Y+PP_PAD+PB_H+PB_GAP; // = 54
+                constexpr int fbw2 = 5*PB_W + 4*PB_GAP;        // = 274
+                if (y >= fby2 && y < fby2+FIRE_H2 && x >= PP_X+PP_PAD && x < PP_X+PP_PAD+fbw2) {
+                    hitPanel = true;
+                    { bool nowFire = !gpioFireState.load(); setGpioFire(nowFire); gpioFireState.store(nowFire); }
+                    std::cout << "[LOCAL BTN] FIRE toggle=" << gpioFireState.load() << std::endl;
+                }
+            }
+            if (!hitPanel) {
+                // D-pad geometry (must match drawing code): BTN=42, GAP=6, STEP=48, GX=18, GY=564
+                constexpr int BTN=42, STEP=48, GX=18, GY=564;
+                auto inBtn = [&](int col, int row) {
+                    int bx = GX + col*STEP, by = GY + row*STEP;
+                    return x >= bx && x < bx+BTN && y >= by && y < by+BTN;
+                };
+                if (inBtn(1,0)) { // UP
+                    if (!trackingEnabled.load())
+                        manualPitchDeg.store(std::clamp(manualPitchDeg.load() + MANUAL_STEP, 5.0, 175.0));
+                    std::cout << "[LOCAL PAD] UP" << std::endl;
+                } else if (inBtn(1,2)) { // DOWN
+                    if (!trackingEnabled.load())
+                        manualPitchDeg.store(std::clamp(manualPitchDeg.load() - MANUAL_STEP, 5.0, 175.0));
+                    std::cout << "[LOCAL PAD] DOWN" << std::endl;
+                } else if (inBtn(0,1)) { // LEFT
+                    if (!trackingEnabled.load())
+                        manualYawDeg.store(std::clamp(manualYawDeg.load() + MANUAL_STEP, 5.0, 175.0));
+                    std::cout << "[LOCAL PAD] LEFT" << std::endl;
+                } else if (inBtn(2,1)) { // RIGHT
+                    if (!trackingEnabled.load())
+                        manualYawDeg.store(std::clamp(manualYawDeg.load() - MANUAL_STEP, 5.0, 175.0));
+                    std::cout << "[LOCAL PAD] RIGHT" << std::endl;
+                } else if (inBtn(1,1)) { // STOP toggle
+                    if (trackingEnabled.load() || scanEnabled.load()) {
+                        remoteStop.store(true);
+                        manualYawDeg.store(currentServoYaw.load());
+                        manualPitchDeg.store(currentServoPitch.load());
+                        scanEnabled.store(false);
+                        trackingEnabled.store(false);
+                        std::cout << "[LOCAL PAD] STOP" << std::endl;
+                    } else {
+                        remoteStop.store(false);
+                        trackingEnabled.store(true);
+                        std::cout << "[LOCAL PAD] STOP -> RESUME TRACKING" << std::endl;
+                    }
+                } else {
+                    // Aim (click outside panel and D-pad)
+                    int sx = (int)(x * (1600.0 / 1280.0));
+                    int sy = (int)(y * (900.0 / 720.0));
+                    localMouseX.store(sx);
+                    localMouseY.store(sy);
+                    localMouseEvent.store(1);
+                    std::cout << "[LOCAL CLICK] display(" << x << "," << y << ") -> stream(" << sx << "," << sy << ")" << std::endl;
+                }
             }
         }
     });
@@ -2943,16 +3020,18 @@ int main()
                     };
 
                     // Semi-transparent backgrounds
+                    bool isStopped = !trackingEnabled.load() && !scanEnabled.load();
                     cv::Mat ovl = display.clone();
                     for (auto [c,r] : std::initializer_list<std::pair<int,int>>{{1,0},{0,1},{2,1},{1,2}})
                         cv::rectangle(ovl, btnRect(c,r), cv::Scalar(30,30,30), -1);
-                    cv::rectangle(ovl, btnRect(1,1), cv::Scalar(0,0,160), -1); // STOP: dark red
+                    // STOP: red when stopped, green when running
+                    cv::rectangle(ovl, btnRect(1,1), isStopped ? cv::Scalar(0,0,160) : cv::Scalar(0,100,0), -1);
                     cv::addWeighted(ovl, 0.65, display, 0.35, 0, display);
 
                     // Button borders
                     for (auto [c,r] : std::initializer_list<std::pair<int,int>>{{1,0},{0,1},{2,1},{1,2}})
                         cv::rectangle(display, btnRect(c,r), cv::Scalar(160,160,160), 2);
-                    cv::rectangle(display, btnRect(1,1), cv::Scalar(60,60,255), 2); // STOP: red border
+                    cv::rectangle(display, btnRect(1,1), isStopped ? cv::Scalar(60,60,255) : cv::Scalar(0,220,0), 2);
 
                     // Arrow triangles (white filled)
                     auto tri = [&](std::vector<cv::Point> pts) {
@@ -2975,6 +3054,54 @@ int main()
                                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1, cv::LINE_AA);
                 }
 
+                // === Control panel overlay (top-right): C S T R Q + FIRE ===
+                {
+                    constexpr int PBW=50, PBH=30, PBGAP=6, PP_PAD=8, FIRE_H=45;
+                    constexpr int PANEL_W = 5*PBW + 4*PBGAP + 2*PP_PAD; // 290
+                    constexpr int PANEL_H = PBH + PBGAP + FIRE_H + 2*PP_PAD; // 97
+                    constexpr int PPX = 1280 - PANEL_W - 10; // 980
+                    constexpr int PPY = 10;
+
+                    bool isTrk = trackingEnabled.load();
+                    bool isSc  = scanEnabled.load();
+                    bool isTrj = trajectoryEnabled.load();
+                    bool iFire = gpioFireState.load();
+
+                    // Background
+                    cv::Mat ovl2 = display.clone();
+                    cv::rectangle(ovl2, cv::Point(PPX,PPY), cv::Point(PPX+PANEL_W,PPY+PANEL_H), cv::Scalar(0,0,0), -1);
+                    cv::addWeighted(ovl2, 0.6, display, 0.4, 0, display);
+                    cv::rectangle(display, cv::Point(PPX,PPY), cv::Point(PPX+PANEL_W,PPY+PANEL_H), cv::Scalar(128,128,128), 1);
+
+                    // Buttons: C S T R Q
+                    const char* plabels[] = {"C","S","T","R","Q"};
+                    bool pactive[] = {isTrk, isSc, isTrj, iFire, false};
+                    for (int i = 0; i < 5; i++) {
+                        int bx = PPX + PP_PAD + i*(PBW+PBGAP);
+                        int by = PPY + PP_PAD;
+                        cv::Scalar bg  = pactive[i] ? cv::Scalar(30,120,30)  : cv::Scalar(60,60,60);
+                        cv::Scalar brd = pactive[i] ? cv::Scalar(100,255,100): cv::Scalar(150,150,150);
+                        cv::rectangle(display, cv::Point(bx,by), cv::Point(bx+PBW,by+PBH), bg, -1);
+                        cv::rectangle(display, cv::Point(bx,by), cv::Point(bx+PBW,by+PBH), brd, 1);
+                        int bl=0;
+                        cv::Size ts = cv::getTextSize(plabels[i], cv::FONT_HERSHEY_SIMPLEX, 0.55, 1, &bl);
+                        cv::putText(display, plabels[i],
+                                    cv::Point(bx+(PBW-ts.width)/2, by+PBH/2+ts.height/2),
+                                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(255,255,255), 1, cv::LINE_AA);
+                    }
+                    // FIRE: red when ON, green when OFF
+                    int fbx = PPX+PP_PAD, fby = PPY+PP_PAD+PBH+PBGAP;
+                    int fbw = 5*PBW + 4*PBGAP;
+                    cv::Scalar fireBg  = iFire ? cv::Scalar(0,0,200)  : cv::Scalar(0,120,0);
+                    cv::Scalar fireBrd = iFire ? cv::Scalar(60,60,255): cv::Scalar(0,220,0);
+                    cv::rectangle(display, cv::Point(fbx,fby), cv::Point(fbx+fbw,fby+FIRE_H), fireBg, -1);
+                    cv::rectangle(display, cv::Point(fbx,fby), cv::Point(fbx+fbw,fby+FIRE_H), fireBrd, 2);
+                    int bl2=0;
+                    cv::Size fts = cv::getTextSize("FIRE", cv::FONT_HERSHEY_SIMPLEX, 0.75, 2, &bl2);
+                    cv::putText(display, "FIRE",
+                                cv::Point(fbx+(fbw-fts.width)/2, fby+(FIRE_H+fts.height)/2),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.75, cv::Scalar(255,255,255), 2, cv::LINE_AA);
+                }
                 cv::imshow("Predictive Gimbal Control", display);
             }
         }

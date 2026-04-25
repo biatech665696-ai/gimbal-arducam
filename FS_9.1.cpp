@@ -248,6 +248,7 @@ std::atomic<bool> remoteToggle(false);
 std::atomic<bool> remoteScanToggle(false);
 std::atomic<bool> remoteTrajToggle(false);
 std::atomic<bool> remoteFireReset(false);
+std::atomic<bool> remoteFireTrigger(false); // remote fire (GPIO26=HIGH)
 std::atomic<bool> gpioFireState(false);  // tracks GPIO26 current state
 
 // Remote nudge control (arrow keys from web UI)
@@ -432,6 +433,11 @@ static void* handleHttpClient(void* arg) {
             remoteFireReset = true;
             remoteCmdNotify.store(6);
             cmdCode = 6;
+        } else if (cmd == "fire") {
+            std::cout << "\n[REMOTE] FIRE command received" << std::endl;
+            remoteFireTrigger = true;
+            remoteCmdNotify.store(7);
+            cmdCode = 7;
         }
         if (cmdCode > 0) {
             remoteLastCmd.store(cmdCode);
@@ -516,6 +522,8 @@ static void* handleHttpClient(void* arg) {
             "<button id='btn-t' type='button' onclick='sendCmd(\"t\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>T</button>"
             "<button id='btn-r' type='button' onclick='sendCmd(\"r\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>R</button>"
             "<button id='btn-q' type='button' onclick='sendCmd(\"q\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>Q</button>"
+            "<br><button id='btn-fire' type='button' onclick='sendCmd(\"fire\")' "
+            "style='font-size:28px;font-weight:bold;padding:14px 32px;margin:8px 3px 3px 3px;width:100%;background:#cc0000;color:#fff;border:3px solid #ff4444;border-radius:12px;cursor:pointer;letter-spacing:2px'>&#128163; FIRE</button>"
             "</div>"
             // Arrow pad — bottom-left corner overlay
             "<div style='position:absolute;bottom:18px;left:18px;z-index:10;user-select:none'>"
@@ -535,10 +543,10 @@ static void* handleHttpClient(void* arg) {
             "var lastSeq=-1;"
             "function setBtn(key,active){var el=document.getElementById('btn-'+key);if(!el)return;el.style.background=active?'#0f766e':'#f0f0f0';el.style.color=active?'#fff':'#000';el.style.border='2px solid '+(active?'#5eead4':'#888');}"
             "function setStatus(text,color){var el=document.getElementById('remoteStatus');el.textContent=text;el.style.color=color||'#9f9';}"
-            "function applyState(state){setBtn('f',state.tracking);setBtn('s',state.scan);setBtn('t',state.trajectory);setBtn('r',state.fire);setBtn('q',false);if(state.seq!==lastSeq){lastSeq=state.seq;if(state.last_cmd===1)setStatus('F ok','#9f9');else if(state.last_cmd===2)setStatus('S ok','#9f9');else if(state.last_cmd===3)setStatus('T ok','#9f9');else if(state.last_cmd===4)setStatus('Q ok','#f99');else if(state.last_cmd===5)setStatus('Aim ok','#9f9');else if(state.last_cmd===6)setStatus('R reset','#9f9');}}"
+            "function applyState(state){setBtn('f',state.tracking);setBtn('s',state.scan);setBtn('t',state.trajectory);setBtn('r',state.fire);setBtn('q',false);var fb=document.getElementById('btn-fire');if(fb){fb.style.background=state.fire?'#ff2200':'#cc0000';}if(state.seq!==lastSeq){lastSeq=state.seq;if(state.last_cmd===1)setStatus('F ok','#9f9');else if(state.last_cmd===2)setStatus('S ok','#9f9');else if(state.last_cmd===3)setStatus('T ok','#9f9');else if(state.last_cmd===4)setStatus('Q ok','#f99');else if(state.last_cmd===5)setStatus('Aim ok','#9f9');else if(state.last_cmd===6)setStatus('R reset','#9f9');else if(state.last_cmd===7)setStatus('FIRE!','#f44');}}"
             "function fetchStatus(){var x=new XMLHttpRequest();x.open('GET','/status?ts='+Date.now(),true);x.timeout=1200;x.onload=function(){if(x.status!==200)return;try{applyState(JSON.parse(x.responseText));}catch(e){setStatus('status err','#f99');}};x.onerror=function(){setStatus('offline','#f99');};x.ontimeout=function(){setStatus('timeout','#f99');};x.send();}"
             "function sendCmd(cmd){setStatus('send '+cmd.toUpperCase(),'#ffd166');var x=new XMLHttpRequest();x.open('GET','/cmd/'+cmd,true);x.timeout=1500;x.onload=function(){if(x.status===200){fetchStatus();}else{setStatus('cmd fail','#f99');}};x.onerror=function(){setStatus('cmd err','#f99');};x.ontimeout=function(){setStatus('cmd timeout','#f99');};x.send();}"
-            "document.addEventListener('keydown',function(e){var k=e.key.toLowerCase();if(k==='f'||k==='s'||k==='t'||k==='r')sendCmd(k);else if(k==='q'||k==='escape')sendCmd('q');else if(e.key==='ArrowLeft'){e.preventDefault();sendCmd('left');}else if(e.key==='ArrowRight'){e.preventDefault();sendCmd('right');}else if(e.key==='ArrowUp'){e.preventDefault();sendCmd('up');}else if(e.key==='ArrowDown'){e.preventDefault();sendCmd('down');}});"
+            "document.addEventListener('keydown',function(e){var k=e.key.toLowerCase();if(e.ctrlKey&&k==='f'){e.preventDefault();sendCmd('fire');}else if(k==='s'||k==='t'||k==='r')sendCmd(k);else if(k==='f')sendCmd(k);else if(k==='q'||k==='escape')sendCmd('q');else if(e.key==='ArrowLeft'){e.preventDefault();sendCmd('left');}else if(e.key==='ArrowRight'){e.preventDefault();sendCmd('right');}else if(e.key==='ArrowUp'){e.preventDefault();sendCmd('up');}else if(e.key==='ArrowDown'){e.preventDefault();sendCmd('down');}});"
             "var simg=document.getElementById('streamImg');"
             "simg.addEventListener('mousedown',function(e){"
             "var r=simg.getBoundingClientRect();"
@@ -952,6 +960,15 @@ public:
     void notifyServoMove() {
         if (warmupFrames_ < 2)
             warmupFrames_ = 2;
+    }
+
+    // Call after a scan step (30° jump). With warmupFrames_=SCAN_WARMUP MOG2 uses lr=0.5
+    // for SCAN_WARMUP frames → background suppressed at ~(1-(1-0.5)^N) per-pixel.
+    // N=30 at 20fps ≈ 1.5s → >99.9% background suppressed before detection window opens.
+    static constexpr int SCAN_WARMUP = 30;
+    void notifyScanStep() {
+        if (warmupFrames_ < SCAN_WARMUP)
+            warmupFrames_ = SCAN_WARMUP;
     }
 
     void reinitBGS() {
@@ -2015,7 +2032,9 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
     double scanYawDeg = -1.0;             // Current scan position (-1 = not yet started)
     int scanDirection = 1;                // 1 = forward (0→180), -1 = backward (180→0)
     const double SCAN_STEP = 30.0;        // Degrees per step
-    const double SCAN_DWELL_SEC = 1.0;    // Seconds to dwell at each position
+    // Dwell = SCAN_WARMUP/fps (MOG2 learn) + detection_window.
+    // SCAN_WARMUP=30 frames at 20fps = 1.5s settle + 2.0s detection window = 3.5s total.
+    const double SCAN_DWELL_SEC = 3.5;    // Seconds to dwell at each position
     auto scanStepTime = std::chrono::steady_clock::now();
     bool scanDwelling = false;            // True while waiting at a scan position
     int scanSettleFrames = 0;             // Suppress scan-exit for N frames after step/resume
@@ -2335,11 +2354,12 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
                         if (scanYawDeg >= 180.0) { scanYawDeg = 180.0; scanDirection = -1; }
                         else if (scanYawDeg <= 0.0) { scanYawDeg = 0.0; scanDirection = 1; }
                         scanStepTime = now;
-                        // Each 30° step also needs settle time: servo physically moves
-                        // ~3 frames + LK flow freeze + MOG2 recovery underestimated for scan.
-                        if (scanSettleFrames < 25) scanSettleFrames = 25;
+                        // Boost MOG2 warmup so it learns the new background at lr=0.5
+                        // for SCAN_WARMUP frames before any detection is considered valid.
+                        detector.notifyScanStep();
+                        scanSettleFrames = MotionDetector::SCAN_WARMUP;
                         std::cout << "[SCAN] Step -> " << scanYawDeg
-                                  << " deg (dir=" << scanDirection << ")" << std::endl;
+                                  << " deg (dir=" << scanDirection << ") [warmup=" << MotionDetector::SCAN_WARMUP << "fr]" << std::endl;
                     }
 
                     queueServoCommand(scanYawDeg, 90.0);
@@ -2667,8 +2687,25 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         cv::rectangle(display, cv::Point(5, 5), cv::Point(440, 170), 
                      cv::Scalar(0, 255, 255), 2);
         
+        // FLYSWATTER watermark — centred, semi-transparent
+        {
+            const std::string title = "FLYSWATTER";
+            int baseline = 0;
+            double titleScale = 2.5;
+            int titleThick = 5;
+            cv::Size tsz = cv::getTextSize(title, cv::FONT_HERSHEY_DUPLEX,
+                                           titleScale, titleThick, &baseline);
+            int tx = (display.cols - tsz.width) / 2;
+            int ty = tsz.height + 10;
+            cv::Mat titleOverlay = display.clone();
+            cv::putText(titleOverlay, title, cv::Point(tx, ty),
+                        cv::FONT_HERSHEY_DUPLEX, titleScale,
+                        cv::Scalar(255, 255, 255), titleThick, cv::LINE_AA);
+            cv::addWeighted(titleOverlay, 0.25, display, 0.75, 0, display);
+        }
+
         // File + commit label (first line) - RED
-        cv::putText(display, "GPT5_v5.cpp | bcf5c61", cv::Point(10, 30), 
+        cv::putText(display, SOURCE_FILENAME, cv::Point(10, 30), 
                    cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(0, 0, 255), 2);
         
         cv::putText(display, info.str(), cv::Point(10, 55), 
@@ -2960,6 +2997,14 @@ int main()
             } else {
                 std::cout << ">>> SCAN MODE DISABLED <<<" << std::endl;
             }
+        } else if (key == 6) {  // Ctrl+F (local) — FIRE (GPIO26 = HIGH)
+            setGpioFire(true);
+            gpioFireState.store(true);
+            std::cout << ">>> CTRL+F: GPIO" << GPIO_FIRE << " = 1 (FIRE!) <<<" << std::endl;
+        } else if (remoteFireTrigger.exchange(false)) {  // Remote FIRE button
+            setGpioFire(true);
+            gpioFireState.store(true);
+            std::cout << ">>> REMOTE FIRE: GPIO" << GPIO_FIRE << " = 1 (FIRE!) <<<" << std::endl;
         } else if (key == 'r' || key == 'R' || remoteFireReset.exchange(false)) {  // R - reset fire signal (GPIO26 = 0)
             setGpioFire(false);
             gpioFireState.store(false);

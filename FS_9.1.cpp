@@ -378,11 +378,16 @@ static void* handleHttpClient(void* arg) {
             remoteQuit = true;
             remoteCmdNotify.store(4);
             cmdCode = 4;
-        } else if (cmd == "f") {
+        } else if (cmd == "c") {
             std::cout << "\n[REMOTE] Toggle mode command received" << std::endl;
             remoteToggle = true;
             remoteCmdNotify.store(1);
             cmdCode = 1;
+        } else if (cmd == "f") {
+            std::cout << "\n[REMOTE] FIRE command received (F key)" << std::endl;
+            remoteFireTrigger = true;
+            remoteCmdNotify.store(7);
+            cmdCode = 7;
         } else if (cmd == "s") {
             std::cout << "\n[REMOTE] Toggle scan command received" << std::endl;
             remoteScanToggle = true;
@@ -461,12 +466,12 @@ static void* handleHttpClient(void* arg) {
             "<body>"
             "<h1>GPT5 Buttons</h1>"
             "<p>This page contains only buttons.</p>"
-            "<form method='GET' action='/cmd/f' target='cmdframe'><button type='submit'>F Track</button></form>"
+            "<form method='GET' action='/cmd/c' target='cmdframe'><button type='submit'>C Track</button></form>"
             "<form method='GET' action='/cmd/s' target='cmdframe'><button type='submit'>S Scan</button></form>"
             "<form method='GET' action='/cmd/t' target='cmdframe'><button type='submit'>T Traj</button></form>"
             "<form method='GET' action='/cmd/q' target='cmdframe'><button type='submit'>Q Quit</button></form>"
             "<iframe name='cmdframe' style='display:none'></iframe>"
-            "<p><a href='/cmd/f' target='cmdframe'>F link</a></p>"
+            "<p><a href='/cmd/c' target='cmdframe'>C link</a></p>"
             "<p><a href='/cmd/s' target='cmdframe'>S link</a></p>"
             "<p><a href='/cmd/t' target='cmdframe'>T link</a></p>"
             "<p><a href='/cmd/q' target='cmdframe'>Q link</a></p>"
@@ -487,11 +492,11 @@ static void* handleHttpClient(void* arg) {
             "<body style='margin:0;background:#fff;color:#000;font-family:Arial,sans-serif;font-size:24px'>"
             "<div style='position:fixed;top:0;left:0;right:0;background:#fff;border-bottom:2px solid #000;padding:10px 12px;z-index:9999'>"
             "<div style='font-size:30px;font-weight:bold;padding-bottom:8px'>GPT5 plain control</div>"
-            "<form method='GET' action='/cmd/f' target='cmdframe' style='display:inline'><button type='submit' style='font-size:28px;padding:14px 22px'>F</button></form> "
+            "<form method='GET' action='/cmd/c' target='cmdframe' style='display:inline'><button type='submit' style='font-size:28px;padding:14px 22px'>C</button></form> "
             "<form method='GET' action='/cmd/s' target='cmdframe' style='display:inline'><button type='submit' style='font-size:28px;padding:14px 22px'>S</button></form> "
             "<form method='GET' action='/cmd/t' target='cmdframe' style='display:inline'><button type='submit' style='font-size:28px;padding:14px 22px'>T</button></form> "
             "<form method='GET' action='/cmd/q' target='cmdframe' style='display:inline'><button type='submit' style='font-size:28px;padding:14px 22px'>Q</button></form>"
-            "<div style='font-size:18px;padding-top:10px'><a href='/cmd/f' target='cmdframe'>F link</a> | <a href='/cmd/s' target='cmdframe'>S link</a> | <a href='/cmd/t' target='cmdframe'>T link</a> | <a href='/cmd/q' target='cmdframe'>Q link</a></div>"
+            "<div style='font-size:18px;padding-top:10px'><a href='/cmd/c' target='cmdframe'>C link</a> | <a href='/cmd/s' target='cmdframe'>S link</a> | <a href='/cmd/t' target='cmdframe'>T link</a> | <a href='/cmd/q' target='cmdframe'>Q link</a></div>"
             "</div>"
             "<div style='padding:170px 12px 12px 12px'>"
             "<p>If you can see this page, browser rendering works.</p>"
@@ -517,7 +522,7 @@ static void* handleHttpClient(void* arg) {
             "<img id='streamImg' src='/stream.mjpg' alt='Stream' style='display:block;width:100%;height:100%;object-fit:contain;background:#000'>"
             "<div id='panel' style='position:absolute;top:12px;right:12px;z-index:10;background:rgba(0,0,0,0.45);padding:8px;border:1px solid #888;border-radius:8px'>"
             "<div id='remoteStatus' style='font-size:14px;color:#9f9;margin:0 0 6px 2px'>Ready</div>"
-            "<button id='btn-f' type='button' onclick='sendCmd(\"f\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>F</button>"
+            "<button id='btn-c' type='button' onclick='sendCmd(\"c\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>C</button>"
             "<button id='btn-s' type='button' onclick='sendCmd(\"s\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>S</button>"
             "<button id='btn-t' type='button' onclick='sendCmd(\"t\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>T</button>"
             "<button id='btn-r' type='button' onclick='sendCmd(\"r\")' style='font-size:22px;font-weight:bold;padding:8px 14px;margin:3px;min-width:52px'>R</button>"
@@ -2732,15 +2737,16 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
         {
             // === KEY HELP OVERLAY (bottom-right corner) ===
             const char* helpLines[] = {
-                "F - Track / Fixed",
+                "C - Track / Fixed",
                 "S - Scan on/off",
                 "T - Trajectory on/off",
-                "Arrows - Manual (Fixed mode)",
-                "Click - Aim+Fire",
-                "R - Fire reset",
+                "Arrows - Manual (Fixed)",
+                "Click - Aim",
+                "F - Fire ON",
+                "R - Fire OFF",
                 "Q - Quit"
             };
-            const int nLines = 7;
+            const int nLines = 8;
             const double fontScale = 0.65;
             const int thickness = 2;
             const int lineH = 28;
@@ -2774,10 +2780,10 @@ void trackingThread(SafeQueue<FrameData>&queue,atomic<bool>&run)
             }
             overlayFrameCount++;
             if (overlayFrameCount - lastCmdFrameN < 90) {  // ~3s at 30fps
-                const char* cmdNames[] = {"", "F: TRACK TOGGLE", "S: SCAN TOGGLE",
+                const char* cmdNames[] = {"", "C: TRACK TOGGLE", "S: SCAN TOGGLE",
                                           "T: TRAJ TOGGLE",  "Q: QUIT",       "CLICK: AIM",
-                                          "R: FIRE RESET"};
-                const char* nm = (lastCmdCode >= 1 && lastCmdCode <= 6) ? cmdNames[lastCmdCode] : "CMD";
+                                          "R: FIRE RESET", "FIRE!"};
+                const char* nm = (lastCmdCode >= 1 && lastCmdCode <= 7) ? cmdNames[lastCmdCode] : "CMD";
                 std::string txt = std::string("REMOTE: ") + nm;
                 int baseline = 0;
                 double fs = 1.4;
@@ -2968,10 +2974,10 @@ int main()
                     cv::Point crt = btnCtr(2,1);
                     tri({{crt.x+12, crt.y}, {crt.x-9, crt.y-10}, {crt.x-9, crt.y+10}}); // RIGHT ▶
 
-                    // STOP: white square on red background
+                    // STOP: text label on red background
                     cv::Point cs = btnCtr(1,1);
-                    cv::rectangle(display, cv::Point(cs.x-9, cs.y-9), cv::Point(cs.x+9, cs.y+9),
-                                  cv::Scalar(255,255,255), -1);
+                    cv::putText(display, "STOP", cv::Point(cs.x-18, cs.y+6),
+                                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255,255,255), 1, cv::LINE_AA);
                 }
 
                 cv::imshow("Predictive Gimbal Control", display);
@@ -2994,19 +3000,15 @@ int main()
             } else {
                 std::cout << ">>> SCAN MODE DISABLED <<<" << std::endl;
             }
-        } else if (key == 6) {  // Ctrl+F (local) — FIRE (GPIO26 = HIGH)
+        } else if (key == 'f' || key == 'F' || remoteFireTrigger.exchange(false)) {  // F - FIRE ON (GPIO26 = HIGH)
             setGpioFire(true);
             gpioFireState.store(true);
-            std::cout << ">>> CTRL+F: GPIO" << GPIO_FIRE << " = 1 (FIRE!) <<<" << std::endl;
-        } else if (remoteFireTrigger.exchange(false)) {  // Remote FIRE button
-            setGpioFire(true);
-            gpioFireState.store(true);
-            std::cout << ">>> REMOTE FIRE: GPIO" << GPIO_FIRE << " = 1 (FIRE!) <<<" << std::endl;
-        } else if (key == 'r' || key == 'R' || remoteFireReset.exchange(false)) {  // R - reset fire signal (GPIO26 = 0)
+            std::cout << ">>> F KEY / REMOTE: GPIO" << GPIO_FIRE << " = 1 (FIRE!) <<<" << std::endl;
+        } else if (key == 'r' || key == 'R' || remoteFireReset.exchange(false)) {  // R - fire OFF (GPIO26 = 0)
             setGpioFire(false);
             gpioFireState.store(false);
             std::cout << ">>> GPIO" << GPIO_FIRE << " = 0 (fire reset) <<<" << std::endl;
-        } else if (key == 'f' || key == 'F' || remoteToggle.exchange(false)) {  // F - toggle tracking mode (local or remote)
+        } else if (key == 'c' || key == 'C' || remoteToggle.exchange(false)) {  // C - toggle tracking/fixed mode
             std::cout << "\n=== F KEY DETECTED - TOGGLING MODE ===" << std::endl;
             // Атомарный toggle: XOR с 1 (true)
             bool wasEnabled = trackingEnabled.exchange(!trackingEnabled.load());
